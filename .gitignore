@@ -1,0 +1,17 @@
+# Rust
+target/
+
+# Python
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Daedalus runtime artefacts
+*.sock
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
