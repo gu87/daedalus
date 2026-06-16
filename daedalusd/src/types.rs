@@ -55,12 +55,274 @@ pub struct SystemError {
 pub enum Message {
     #[serde(rename = "system.ping")]
     SystemPing(SystemPing),
-
     #[serde(rename = "system.pong")]
     SystemPong(SystemPong),
-
     #[serde(rename = "system.error")]
     SystemError(SystemError),
+    #[serde(rename = "task.dispatch")]
+    TaskDispatch(Box<TaskDispatch>),
+    #[serde(rename = "task.stream")]
+    TaskStream(TaskStream),
+    #[serde(rename = "task.done")]
+    TaskDone(Box<TaskDone>),
+    #[serde(rename = "task.error")]
+    TaskError(TaskError),
+    #[serde(rename = "permission.request")]
+    PermissionRequest(PermissionRequest),
+    #[serde(rename = "permission.response")]
+    PermissionResponse(PermissionResponse),
+    #[serde(rename = "session.rejoin")]
+    SessionRejoin(SessionRejoin),
+}
+
+// ── Shared domain types ──────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum RiskLevel {
+    R0,
+    R1,
+    R2,
+    R3,
+    R4,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecision {
+    Approved,
+    Denied,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolResult {
+    pub output: String,
+    pub is_error: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "kind")]
+pub enum StreamChunk {
+    #[serde(rename = "text")]
+    Text { content: String },
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    #[serde(rename = "done")]
+    Done,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ChatResponse {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ModelConfig {
+    pub model: String,
+    pub max_tokens: u32,
+    pub temperature: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskCard {
+    pub schema_version: String,
+    pub task_card_id: String,
+    pub project: String,
+    pub created_at: String,
+    pub status: String,
+    pub goal: String,
+    pub compiled_intent: serde_json::Value,
+    pub context: TaskContext,
+    pub execution_plan: serde_json::Value,
+    pub acceptance_criteria: serde_json::Value,
+    pub allowed_files: Vec<String>,
+    pub safety: SafetyRules,
+    pub output_contract: serde_json::Value,
+    pub review_gate_criteria: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskContext {
+    pub user_preferences: serde_json::Value,
+    pub project_context: ProjectContext,
+    pub relevant_feedback: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ProjectContext {
+    pub name: String,
+    pub data: serde_json::Value,
+    pub global_must_avoid: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SafetyRules {
+    pub allowed_paths: Vec<String>,
+    pub denied_commands: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Outbox {
+    pub schema_version: String,
+    pub task_id: String,
+    pub agent_id: String,
+    pub status: String,
+    pub summary: String,
+    pub changed_files: Vec<String>,
+    pub changed_files_source: String,
+    pub verification: serde_json::Value,
+    pub evidence: serde_json::Value,
+    pub known_risks: Vec<String>,
+    pub errors: Vec<String>,
+    pub error_taxonomy: Vec<serde_json::Value>,
+    pub needs_human_review: bool,
+    pub notes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskDispatch {
+    pub ts: String,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    pub req_id: String,
+    pub agent_id: String,
+    pub task_id: String,
+    pub task_card: TaskCard,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskStream {
+    pub ts: String,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    pub req_id: String,
+    pub agent_id: String,
+    pub task_id: String,
+    pub chunk: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskDone {
+    pub ts: String,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    pub req_id: String,
+    pub agent_id: String,
+    pub task_id: String,
+    pub outbox: Outbox,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskError {
+    pub ts: String,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    pub req_id: String,
+    pub agent_id: String,
+    pub task_id: String,
+    pub error_taxonomy: String,
+    pub detail: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PermissionRequest {
+    pub ts: String,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    pub permission_id: String,
+    pub req_id: String,
+    pub agent_id: String,
+    pub tool: String,
+    pub args: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PermissionResponse {
+    pub ts: String,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    pub permission_id: String,
+    pub req_id: String,
+    pub decision: PermissionDecision,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SessionRejoin {
+    pub ts: String,
+    pub req_id: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub last_event_id: Option<String>,
+}
+
+pub fn check_schema_version(field: &str, version: &str) -> Result<(), String> {
+    if version.is_empty() {
+        Err(format!("{field} empty"))
+    } else if version != "2.8" {
+        Err(format!("{field} bad version"))
+    } else {
+        Ok(())
+    }
+}
+pub fn validate_task_card(card: &TaskCard) -> Result<(), String> {
+    check_schema_version("task_card", &card.schema_version)?;
+    if card.task_card_id.is_empty() {
+        Err("empty id".into())
+    } else {
+        Ok(())
+    }
+}
+pub fn validate_outbox(outbox: &Outbox) -> Result<(), String> {
+    check_schema_version("outbox", &outbox.schema_version)?;
+    if outbox.task_id.is_empty() {
+        Err("empty task_id".into())
+    } else if outbox.agent_id.is_empty() {
+        Err("empty agent_id".into())
+    } else {
+        Ok(())
+    }
+}
+pub fn validate_task_dispatch_consistency(td: &TaskDispatch) -> Result<(), String> {
+    validate_task_card(&td.task_card)?;
+    if td.task_card.task_card_id != td.task_id {
+        Err("task_id mismatch".into())
+    } else {
+        Ok(())
+    }
+}
+pub fn validate_task_done_consistency(td: &TaskDone) -> Result<(), String> {
+    validate_outbox(&td.outbox)?;
+    if td.outbox.task_id != td.task_id {
+        Err("task_id mismatch".into())
+    } else if td.outbox.agent_id != td.agent_id {
+        Err("agent_id mismatch".into())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

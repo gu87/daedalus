@@ -11,10 +11,10 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use tokio::net::UnixListener;
-use tokio::task::JoinSet;
 
 use crate::error::DaedalusError;
 use crate::ipc::peer;
+use crate::ipc::session::Session;
 
 /// Start the UDS server.
 ///
@@ -51,26 +51,25 @@ pub async fn run(
     let listener = UnixListener::bind(socket_path).map_err(DaedalusError::Io)?;
 
     // Spawn peer tasks into a JoinSet so we can abort them on shutdown.
-    let mut peers: JoinSet<()> = JoinSet::new();
+    let mut sessions: Vec<Session> = Vec::new();
 
     // Capture the accept-loop result so we can always clean up before
     // propagating the error.
     let accept_result = tokio::select! {
-        result = accept_loop(&listener, &mut peers) => {
-            // Accept loop ended on its own (e.g. listener error).
+        result = accept_loop(&listener, &mut sessions) => {
             Some(result)
         }
         _ = shutdown => {
-            // Shutdown signal received — stop accepting.
             None
         }
     };
 
-    // Drop the listener so no new connections can be accepted.
     drop(listener);
 
-    // Abort any still-running peer tasks immediately.
-    peers.abort_all();
+    for s in &sessions {
+        s.state.shutdown.cancel();
+    }
+    drop(sessions);
 
     // Clean up the socket we created — always, even on error.
     let _ = std::fs::remove_file(socket_path);
@@ -85,7 +84,7 @@ pub async fn run(
 /// Accept connections in a loop, spawning each into `peers`.
 async fn accept_loop(
     listener: &UnixListener,
-    peers: &mut JoinSet<()>,
+    sessions: &mut Vec<Session>,
 ) -> Result<(), DaedalusError> {
     loop {
         let (stream, addr) = listener.accept().await.map_err(DaedalusError::Io)?;
@@ -94,9 +93,7 @@ async fn accept_loop(
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("unnamed"));
 
-        peers.spawn(async move {
-            peer::handle_connection(stream, peer_addr).await;
-        });
+        sessions.push(peer::spawn_session(stream, peer_addr));
     }
 }
 
@@ -323,13 +320,16 @@ mod tests {
         socket_path: &Path,
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), DaedalusError> {
-        let mut peers: JoinSet<()> = JoinSet::new();
+        let mut sessions: Vec<Session> = Vec::new();
         let accept_result = tokio::select! {
-            result = accept_loop(&listener, &mut peers) => Some(result),
+            result = accept_loop(&listener, &mut sessions) => Some(result),
             _ = shutdown => None,
         };
         drop(listener);
-        peers.abort_all();
+        for s in &sessions {
+            s.state.shutdown.cancel();
+        }
+        drop(sessions);
         let _ = std::fs::remove_file(socket_path);
         match accept_result {
             Some(Err(e)) => Err(e),

@@ -214,7 +214,6 @@ fn validate_message(msg: &Message) -> Result<(), ProtocolError> {
                     detail: "Invalid RFC 3339 timestamp".to_string(),
                 });
             }
-            // req_id is optional on system.error, but if present it must be non-empty.
             if let Some(ref rid) = err.req_id {
                 if rid.is_empty() {
                     return Err(ProtocolError {
@@ -225,6 +224,15 @@ fn validate_message(msg: &Message) -> Result<(), ProtocolError> {
                 }
             }
             Ok(())
+        }
+        Message::TaskDispatch(_)
+        | Message::TaskStream(_)
+        | Message::TaskDone(_)
+        | Message::TaskError(_)
+        | Message::PermissionRequest(_)
+        | Message::PermissionResponse(_)
+        | Message::SessionRejoin(_) => {
+            Ok(()) // Phase 2+3: no additional validation for now
         }
     }
 }
