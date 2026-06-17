@@ -1191,7 +1191,7 @@ Python DaedalusClient 增加 dispatch() 方法，可读多行直到 done/error�
 完成后用 FakePermissionBroker 验证完整权限往返 + event_id 字段往返 + session.rejoin 错误响应。
 ```
 
-## P2.6 Heartbeat + 超时 + orphan 回收 + 生命周期接线
+## P2.6 Heartbeat + 超时 + orphan 回收 + 生命周期接线 [DONE]
 
 ### 目标
 
@@ -1294,6 +1294,58 @@ AgentRunStatus 保持 6 状态不变。不创建 TaskStatus。agent_runs CHECK �
 测试通过直接注入过去时间戳验证 orphan 逻辑。
 完成后报告测试结果。
 ```
+
+### 实际验证结果（含 Codex 返修）
+
+**新增/修改文件（9 个）：**
+- `daedalusd/src/db/registry.rs` — 新增 6 个带 WHERE status 条件的 transition 方法（+11 单测）
+- `daedalusd/src/db/orphan.rs` — `scan_orphans()` + 6 单测（新增文件）
+- `daedalusd/src/agent/heartbeat.rs` — `HeartbeatLoop` + 2 异步测试（新增文件）
+- `daedalusd/src/agent/loop.rs` — `LifecycleContext`、`run_with_lifecycle()`、`run_inner()`；BuildingPrompt `?` → `match`；Done/Failed DB write 显式 warning；3 处 `return Err` → `LoopState::Failed`
+- `daedalusd/src/main.rs` — shutdown 重构为 `CancellationToken` + orphan 扫描后台 task
+- `daedalusd/src/db/mod.rs` — 加 `pub mod orphan;`
+- `daedalusd/src/agent/mod.rs` — 加 `pub mod heartbeat;`
+- `daedalusd/tests/agent_loop.rs` — 新增 5 个 lifecycle 集成测试（#16-#20）
+- `daedalusd/tests/db_registry.rs` — 新增 6 个 transition 集成测试
+
+**测试结果：254 passed, 0 failed, 1 skipped**
+```
+cargo fmt --all -- --check               ✅ 通过
+cargo test --workspace                   ✅ 254 passed (169 unit + 85 integration)
+cargo clippy --workspace -- -D warnings  ✅ 通过
+```
+
+细目：
+
+| 测试套 | passed |
+|--------|-------:|
+| lib unit (170 tests, 1 filtered) | 169 |
+| agent_loop integration | 20 |
+| db_registry integration | 15 |
+| permission integration | 13 |
+| protocol integration | 6 |
+| provider integration | 26 |
+| tool_registry integration | 5 |
+| **合计** | **254** |
+
+唯一跳过：`ipc::server::tests::long_line_returns_error_and_closes` — 预存问题，P2.6 未引入。
+
+**返修变更（3 项）：**
+1. `BuildingPrompt` 中 `build_system_prompt(...)?` 改为 `match { Ok/Err → Failed }`，确保 lifecycle 已启动后所有可恢复错误均进入 `LoopState::Failed` arm 统一 abort heartbeat + 写 DB
+2. Done/Failed 分支 DB transition 显式处理 open error / transition error / rows=0 / join error，各输出 eprintln warning，不覆盖 AgentLoop 业务返回值
+3. 新增 `scenario_20_lifecycle_prompt_failure_writes_error` — 覆盖 prompt 失败 → status='error' + taxonomy='tool_failure' + completed_at
+
+**范围审计：**
+- ✅ `AgentLoop::run(task, timeout)` 签名不变，委托 `run_inner(None, ...)`
+- ✅ `AgentRuntime` trait 不变
+- ✅ `transition_to_running` 在 `run_with_lifecycle` 入口立即执行（早于 BuildingPrompt）
+- ✅ `touch_heartbeat` 带 `WHERE status='running'`；rows=0 → warning + 停止心跳
+- ✅ P2.6 不负责 insert queued row — 测试手动 `insert_run(status=queued)`
+- ✅ 不改 SQLite schema，`user_version` 保持 1，无新 migration
+- ✅ 不碰 P2.5 文件：peer/control/protocol/session/permission/types/client 零修改
+- ✅ 不定义 ErrorCode enum，不创建 TaskStatus，不创建 pipeline.sqlite
+- ✅ 不做 task.dispatch → AgentLoop → task.done 端到端（P2.7 范围）
+- ✅ 零 `unsafe`
 
 ## P2.7 Phase 2 跨模块验收与收口
 

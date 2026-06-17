@@ -1,7 +1,7 @@
 //! Minimal CRUD for the `agent_runs` lifecycle table.
 //!
 //! Phase 1 scope: insert (always `queued`), read by id, update status.
-//! No list/search/heartbeat/orphan/state-machine logic.
+//! P2.6: add conditional transition methods with WHERE status guards.
 
 use rusqlite::{params, Connection, Result};
 
@@ -108,6 +108,81 @@ pub fn update_status(conn: &Connection, run_id: &str, status: &AgentRunStatus) -
         params![status.as_str(), run_id],
     )?;
     Ok(())
+}
+
+// ── P2.6 conditional transition methods ─────────────────────────────
+
+/// Write heartbeat timestamp. Only touches rows that are still `running`.
+/// Returns the number of rows updated (0 means the run is no longer running).
+pub fn touch_heartbeat(conn: &Connection, run_id: &str, now: i64) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE agent_runs SET heartbeat_at = ?1 WHERE run_id = ?2 AND status = 'running'",
+        params![now, run_id],
+    )?;
+    Ok(n)
+}
+
+/// queued → running, also writes the first `heartbeat_at`.
+/// WHERE status = 'queued'
+pub fn transition_to_running(conn: &Connection, run_id: &str, now: i64) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE agent_runs SET status = 'running', heartbeat_at = ?1 WHERE run_id = ?2 AND status = 'queued'",
+        params![now, run_id],
+    )?;
+    Ok(n)
+}
+
+/// running → done, writes `completed_at` + `outbox_json`.
+/// WHERE status = 'running'
+pub fn transition_to_done(
+    conn: &Connection,
+    run_id: &str,
+    now: i64,
+    outbox_json: &str,
+) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE agent_runs SET status = 'done', completed_at = ?1, outbox_json = ?2 \
+         WHERE run_id = ?3 AND status = 'running'",
+        params![now, outbox_json, run_id],
+    )?;
+    Ok(n)
+}
+
+/// running → error, writes `completed_at` + `error_taxonomy`.
+/// WHERE status = 'running'
+pub fn transition_to_error(
+    conn: &Connection,
+    run_id: &str,
+    now: i64,
+    error_taxonomy: &str,
+) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE agent_runs SET status = 'error', completed_at = ?1, error_taxonomy = ?2 \
+         WHERE run_id = ?3 AND status = 'running'",
+        params![now, error_taxonomy, run_id],
+    )?;
+    Ok(n)
+}
+
+/// running → cancelled, writes `completed_at`.
+/// WHERE status = 'running'
+pub fn transition_to_cancelled(conn: &Connection, run_id: &str, now: i64) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE agent_runs SET status = 'cancelled', completed_at = ?1 \
+         WHERE run_id = ?2 AND status = 'running'",
+        params![now, run_id],
+    )?;
+    Ok(n)
+}
+
+/// running → orphaned (called only by the background orphan scanner).
+/// WHERE status = 'running'
+pub fn transition_to_orphaned(conn: &Connection, run_id: &str) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE agent_runs SET status = 'orphaned' WHERE run_id = ?1 AND status = 'running'",
+        params![run_id],
+    )?;
+    Ok(n)
 }
 
 // ── internal ─────────────────────────────────────────────────────────
@@ -244,6 +319,122 @@ mod tests {
         assert!(
             msg.contains("foreign key") || msg.contains("constraint"),
             "expected FOREIGN KEY error, got: {msg}"
+        );
+    }
+
+    // ── P2.6 transition tests ──────────────────────────────────────
+
+    #[test]
+    fn transition_to_running_from_queued() {
+        let (_dir, conn) = setup();
+        insert_run(&conn, &new_input("run-r1")).unwrap();
+        let rows = transition_to_running(&conn, "run-r1", 1700001000).unwrap();
+        assert_eq!(rows, 1);
+        let row = get_run(&conn, "run-r1").unwrap().unwrap();
+        assert_eq!(row.status, AgentRunStatus::Running);
+        assert_eq!(row.heartbeat_at, Some(1700001000));
+    }
+
+    #[test]
+    fn transition_to_running_twice_second_is_zero() {
+        let (_dir, conn) = setup();
+        insert_run(&conn, &new_input("run-r2")).unwrap();
+        let rows1 = transition_to_running(&conn, "run-r2", 1700001000).unwrap();
+        assert_eq!(rows1, 1);
+        let rows2 = transition_to_running(&conn, "run-r2", 1700002000).unwrap();
+        assert_eq!(rows2, 0, "second transition should affect 0 rows");
+    }
+
+    #[test]
+    fn transition_to_done_from_running() {
+        let (_dir, conn) = setup();
+        insert_run(&conn, &new_input("run-d1")).unwrap();
+        transition_to_running(&conn, "run-d1", 1700001000).unwrap();
+        let rows = transition_to_done(&conn, "run-d1", 1700002000, r#"{"ok":true}"#).unwrap();
+        assert_eq!(rows, 1);
+        let row = get_run(&conn, "run-d1").unwrap().unwrap();
+        assert_eq!(row.status, AgentRunStatus::Done);
+        assert_eq!(row.completed_at, Some(1700002000));
+        assert_eq!(row.outbox_json.as_deref(), Some(r#"{"ok":true}"#));
+    }
+
+    #[test]
+    fn transition_to_done_from_error_is_zero() {
+        let (_dir, conn) = setup();
+        insert_run(&conn, &new_input("run-d2")).unwrap();
+        update_status(&conn, "run-d2", &AgentRunStatus::Error).unwrap();
+        let rows = transition_to_done(&conn, "run-d2", 1700002000, r#"{"ok":true}"#).unwrap();
+        assert_eq!(rows, 0, "terminal status should not be overwritten");
+    }
+
+    #[test]
+    fn transition_to_error_from_running() {
+        let (_dir, conn) = setup();
+        insert_run(&conn, &new_input("run-e1")).unwrap();
+        transition_to_running(&conn, "run-e1", 1700001000).unwrap();
+        let rows = transition_to_error(&conn, "run-e1", 1700002000, "task_timeout").unwrap();
+        assert_eq!(rows, 1);
+        let row = get_run(&conn, "run-e1").unwrap().unwrap();
+        assert_eq!(row.status, AgentRunStatus::Error);
+        assert_eq!(row.completed_at, Some(1700002000));
+        assert_eq!(row.error_taxonomy.as_deref(), Some("task_timeout"));
+    }
+
+    #[test]
+    fn transition_to_cancelled_from_running() {
+        let (_dir, conn) = setup();
+        insert_run(&conn, &new_input("run-c1")).unwrap();
+        transition_to_running(&conn, "run-c1", 1700001000).unwrap();
+        let rows = transition_to_cancelled(&conn, "run-c1", 1700002000).unwrap();
+        assert_eq!(rows, 1);
+        let row = get_run(&conn, "run-c1").unwrap().unwrap();
+        assert_eq!(row.status, AgentRunStatus::Cancelled);
+        assert_eq!(row.completed_at, Some(1700002000));
+    }
+
+    #[test]
+    fn touch_heartbeat_updates_timestamp() {
+        let (_dir, conn) = setup();
+        insert_run(&conn, &new_input("run-h1")).unwrap();
+        transition_to_running(&conn, "run-h1", 1700001000).unwrap();
+        let rows = touch_heartbeat(&conn, "run-h1", 1700001100).unwrap();
+        assert_eq!(rows, 1);
+        let row = get_run(&conn, "run-h1").unwrap().unwrap();
+        assert_eq!(row.heartbeat_at, Some(1700001100));
+    }
+
+    #[test]
+    fn touch_heartbeat_on_non_running_returns_zero() {
+        let (_dir, conn) = setup();
+        insert_run(&conn, &new_input("run-h2")).unwrap();
+        // Still queued — not running yet.
+        let rows = touch_heartbeat(&conn, "run-h2", 1700001000).unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn terminal_statuses_do_not_cross_overwrite() {
+        let (_dir, conn) = setup();
+        // done → error: 0
+        insert_run(&conn, &new_input("run-x1")).unwrap();
+        update_status(&conn, "run-x1", &AgentRunStatus::Done).unwrap();
+        assert_eq!(
+            transition_to_error(&conn, "run-x1", 1700001000, "x").unwrap(),
+            0
+        );
+        // error → cancelled: 0
+        insert_run(&conn, &new_input("run-x2")).unwrap();
+        update_status(&conn, "run-x2", &AgentRunStatus::Error).unwrap();
+        assert_eq!(
+            transition_to_cancelled(&conn, "run-x2", 1700001000).unwrap(),
+            0
+        );
+        // cancelled → done: 0
+        insert_run(&conn, &new_input("run-x3")).unwrap();
+        update_status(&conn, "run-x3", &AgentRunStatus::Cancelled).unwrap();
+        assert_eq!(
+            transition_to_done(&conn, "run-x3", 1700001000, "{}").unwrap(),
+            0
         );
     }
 }

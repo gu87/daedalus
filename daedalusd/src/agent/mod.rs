@@ -1,6 +1,7 @@
 //! Agent runtime module (Agent Loop, state machine, adapter, prompt builder).
 
 pub mod adapter;
+pub mod heartbeat;
 pub mod r#loop;
 pub mod permission;
 pub mod prompt;

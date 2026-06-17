@@ -260,3 +260,108 @@ fn nonexistent_parent_rejected_by_fk() {
         "expected FOREIGN KEY error, got: {msg}"
     );
 }
+
+// ── P2.6 transition integration tests ─────────────────────────────────
+
+fn seed_queued(conn: &Connection, run_id: &str) {
+    registry::insert_run(
+        conn,
+        &NewAgentRun {
+            run_id: run_id.to_string(),
+            agent_id: "agent-p2".to_string(),
+            task_id: "task-p2".to_string(),
+            parent_run_id: None,
+            spawn_depth: 0,
+            spawned_at: 1700000000,
+            timeout_seconds: Some(300),
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn transition_to_running_from_queued_via_public_api() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_queued(&conn, "r-trans-1");
+
+    let rows = registry::transition_to_running(&conn, "r-trans-1", 1700001000).unwrap();
+    assert_eq!(rows, 1);
+    let row = registry::get_run(&conn, "r-trans-1").unwrap().unwrap();
+    assert_eq!(row.status, AgentRunStatus::Running);
+    assert_eq!(row.heartbeat_at, Some(1700001000));
+}
+
+#[test]
+fn transition_to_running_twice_second_is_zero() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_queued(&conn, "r-trans-2");
+
+    assert_eq!(
+        registry::transition_to_running(&conn, "r-trans-2", 1700001000).unwrap(),
+        1
+    );
+    assert_eq!(
+        registry::transition_to_running(&conn, "r-trans-2", 1700002000).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn transition_to_done_writes_completed_at_and_outbox() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_queued(&conn, "r-done-1");
+    registry::transition_to_running(&conn, "r-done-1", 1700001000).unwrap();
+
+    let rows =
+        registry::transition_to_done(&conn, "r-done-1", 1700002000, r#"{"ok":true}"#).unwrap();
+    assert_eq!(rows, 1);
+    let row = registry::get_run(&conn, "r-done-1").unwrap().unwrap();
+    assert_eq!(row.status, AgentRunStatus::Done);
+    assert_eq!(row.completed_at, Some(1700002000));
+    assert_eq!(row.outbox_json.as_deref(), Some(r#"{"ok":true}"#));
+}
+
+#[test]
+fn transition_to_error_writes_completed_at_and_taxonomy() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_queued(&conn, "r-err-1");
+    registry::transition_to_running(&conn, "r-err-1", 1700001000).unwrap();
+
+    let rows = registry::transition_to_error(&conn, "r-err-1", 1700002000, "task_timeout").unwrap();
+    assert_eq!(rows, 1);
+    let row = registry::get_run(&conn, "r-err-1").unwrap().unwrap();
+    assert_eq!(row.status, AgentRunStatus::Error);
+    assert_eq!(row.completed_at, Some(1700002000));
+    assert_eq!(row.error_taxonomy.as_deref(), Some("task_timeout"));
+}
+
+#[test]
+fn transition_to_cancelled_from_running() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_queued(&conn, "r-canc-1");
+    registry::transition_to_running(&conn, "r-canc-1", 1700001000).unwrap();
+
+    let rows = registry::transition_to_cancelled(&conn, "r-canc-1", 1700002000).unwrap();
+    assert_eq!(rows, 1);
+    let row = registry::get_run(&conn, "r-canc-1").unwrap().unwrap();
+    assert_eq!(row.status, AgentRunStatus::Cancelled);
+    assert_eq!(row.completed_at, Some(1700002000));
+}
+
+#[test]
+fn touch_heartbeat_updates_timestamp() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_queued(&conn, "r-hb-1");
+    registry::transition_to_running(&conn, "r-hb-1", 1700001000).unwrap();
+
+    let rows = registry::touch_heartbeat(&conn, "r-hb-1", 1700001100).unwrap();
+    assert_eq!(rows, 1);
+    let row = registry::get_run(&conn, "r-hb-1").unwrap().unwrap();
+    assert_eq!(row.heartbeat_at, Some(1700001100));
+}

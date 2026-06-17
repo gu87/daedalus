@@ -824,6 +824,287 @@ async fn scenario_14_denied_commands_from_task_card() {
     );
 }
 
+// ── P2.6 lifecycle integration tests ────────────────────────────────────
+
+use daedalusd::agent::r#loop::LifecycleContext;
+use daedalusd::db::{migrations, pool, registry};
+
+fn lifecycle_db(dir: &tempfile::TempDir) -> (std::path::PathBuf, String) {
+    let db_path = dir.path().join("lifecycle.sqlite");
+    let mut conn = pool::open(&db_path).unwrap();
+    migrations::run_all(&mut conn).unwrap();
+    let run_id = "lc-run-1".to_string();
+    registry::insert_run(
+        &conn,
+        &registry::NewAgentRun {
+            run_id: run_id.clone(),
+            agent_id: "test-agent".to_string(),
+            task_id: "test-task-1".to_string(),
+            parent_run_id: None,
+            spawn_depth: 0,
+            spawned_at: 1700000000,
+            timeout_seconds: Some(300),
+        },
+    )
+    .unwrap();
+    (db_path, run_id)
+}
+
+/// 16. Normal completion writes done + outbox_json to DB.
+#[tokio::test]
+async fn scenario_16_lifecycle_normal_done() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config_files(&dir);
+    let (db_path, run_id) = lifecycle_db(&dir);
+
+    let provider = Arc::new(FakeProvider::new(make_text_chunks("Hello, lifecycle!")));
+    let broker = Arc::new(FakePermissionBroker {
+        decision: PermissionDecision::Approved,
+        delay: None,
+    });
+    let mut ag = build_loop(&dir, provider, vec![], broker);
+
+    let lc = LifecycleContext {
+        run_id: run_id.clone(),
+        db_path: db_path.clone(),
+    };
+    let outbox = ag
+        .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(outbox.status, "waiting_for_verification");
+
+    // Verify DB state.
+    let conn = pool::open(&db_path).unwrap();
+    let row = registry::get_run(&conn, &run_id).unwrap().unwrap();
+    assert_eq!(row.status, registry::AgentRunStatus::Done);
+    assert!(row.completed_at.is_some());
+    assert!(row.outbox_json.is_some());
+}
+
+/// 17. Timeout writes error + task_timeout taxonomy to DB.
+#[tokio::test]
+async fn scenario_17_lifecycle_timeout_writes_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config_files(&dir);
+    let (db_path, run_id) = lifecycle_db(&dir);
+
+    struct HangProvider;
+    #[async_trait]
+    impl LLMProvider for HangProvider {
+        async fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &[ToolDef],
+            _: &ModelConfig,
+        ) -> Result<ChatResponse, daedalusd::error::ProviderError> {
+            Ok(ChatResponse {
+                content: String::new(),
+                tool_calls: vec![],
+            })
+        }
+        async fn stream(
+            &self,
+            _: &[ChatMessage],
+            _: &[ToolDef],
+            _: &ModelConfig,
+        ) -> Result<StreamHandle, daedalusd::error::ProviderError> {
+            let (tx, handle) = stream_channel();
+            tokio::spawn(async move {
+                let _tx = tx;
+                std::future::pending::<()>().await;
+            });
+            Ok(handle)
+        }
+    }
+
+    let provider: Arc<dyn LLMProvider> = Arc::new(HangProvider);
+    let broker = Arc::new(FakePermissionBroker {
+        decision: PermissionDecision::Approved,
+        delay: None,
+    });
+    let mut ag = build_loop(&dir, provider, vec![], broker);
+
+    let lc = LifecycleContext {
+        run_id: run_id.clone(),
+        db_path: db_path.clone(),
+    };
+    let err = ag
+        .run_with_lifecycle(lc, dummy_task_card(), Duration::from_millis(100))
+        .await
+        .unwrap_err();
+    assert_eq!(err.reason, ErrorKind::TaskTimeout);
+
+    let conn = pool::open(&db_path).unwrap();
+    let row = registry::get_run(&conn, &run_id).unwrap().unwrap();
+    assert_eq!(row.status, registry::AgentRunStatus::Error);
+    assert_eq!(row.error_taxonomy.as_deref(), Some("task_timeout"));
+    assert!(row.completed_at.is_some());
+}
+
+/// 18. Cancel writes cancelled to DB.
+#[tokio::test]
+async fn scenario_18_lifecycle_cancel_writes_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config_files(&dir);
+    let (db_path, run_id) = lifecycle_db(&dir);
+
+    struct HangProvider;
+    #[async_trait]
+    impl LLMProvider for HangProvider {
+        async fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &[ToolDef],
+            _: &ModelConfig,
+        ) -> Result<ChatResponse, daedalusd::error::ProviderError> {
+            Ok(ChatResponse {
+                content: String::new(),
+                tool_calls: vec![],
+            })
+        }
+        async fn stream(
+            &self,
+            _: &[ChatMessage],
+            _: &[ToolDef],
+            _: &ModelConfig,
+        ) -> Result<StreamHandle, daedalusd::error::ProviderError> {
+            let (tx, handle) = stream_channel();
+            tokio::spawn(async move {
+                let _tx = tx;
+                std::future::pending::<()>().await;
+            });
+            Ok(handle)
+        }
+    }
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let provider: Arc<dyn LLMProvider> = Arc::new(HangProvider);
+    let broker = Arc::new(FakePermissionBroker {
+        decision: PermissionDecision::Approved,
+        delay: None,
+    });
+    let mut ag = {
+        let registry = ToolRegistry::new();
+        let registry = Arc::new(registry);
+        let mut router = Router::new();
+        router.register("fake-model", provider);
+        let router = Arc::new(router);
+        let strategy = ModelStrategy {
+            primary: ModelConfig {
+                model: "fake-model".into(),
+                max_tokens: 1024,
+                temperature: 0.0,
+            },
+            fallback_chain: vec![],
+        };
+        let prompt_builder = build_prompt_builder(&dir);
+        AgentLoop::with_components(
+            "test-agent".into(),
+            router,
+            strategy,
+            prompt_builder,
+            registry,
+            broker,
+            cancel_token,
+        )
+    };
+
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        token.cancel();
+    });
+
+    let lc = LifecycleContext {
+        run_id: run_id.clone(),
+        db_path: db_path.clone(),
+    };
+    let err = ag
+        .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(30))
+        .await
+        .unwrap_err();
+    assert_eq!(err.reason, ErrorKind::Cancelled);
+
+    let conn = pool::open(&db_path).unwrap();
+    let row = registry::get_run(&conn, &run_id).unwrap().unwrap();
+    assert_eq!(row.status, registry::AgentRunStatus::Cancelled);
+    assert!(row.completed_at.is_some());
+}
+
+/// 19. Tool access rejection (allowed_agents) writes error to DB.
+#[tokio::test]
+async fn scenario_19_lifecycle_tool_access_rejected_writes_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config_files(&dir);
+    let (db_path, run_id) = lifecycle_db(&dir);
+
+    let chunks = make_tool_call_chunks(vec![("c1", "secret_tool", json!({}))]);
+    let provider = Arc::new(FakeProvider::new(chunks));
+    let secret_tool = Arc::new(FakeTool {
+        name: "secret_tool",
+        risk: RiskLevel::R3,
+        agents: vec!["claude".into()], // "test-agent" is NOT allowed
+        perm: false,
+        output: "secret".into(),
+        is_error: false,
+        call_count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let broker = Arc::new(FakePermissionBroker {
+        decision: PermissionDecision::Approved,
+        delay: None,
+    });
+    let mut ag = build_loop(&dir, provider, vec![secret_tool as Arc<dyn Tool>], broker);
+
+    let lc = LifecycleContext {
+        run_id: run_id.clone(),
+        db_path: db_path.clone(),
+    };
+    let err = ag
+        .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
+        .await
+        .unwrap_err();
+    assert_eq!(err.reason, ErrorKind::ToolFailure);
+
+    let conn = pool::open(&db_path).unwrap();
+    let row = registry::get_run(&conn, &run_id).unwrap().unwrap();
+    assert_eq!(row.status, registry::AgentRunStatus::Error);
+    assert_eq!(row.error_taxonomy.as_deref(), Some("tool_failure"));
+    assert!(row.completed_at.is_some());
+}
+
+/// 20. Prompt builder failure writes error to DB via Failed arm.
+#[tokio::test]
+async fn scenario_20_lifecycle_prompt_failure_writes_error() {
+    let dir = tempfile::tempdir().unwrap();
+    // Deliberately do NOT write config files — PromptBuilder will fail.
+    let (db_path, run_id) = lifecycle_db(&dir);
+
+    let provider = Arc::new(FakeProvider::new(make_text_chunks("unreachable")));
+    let broker = Arc::new(FakePermissionBroker {
+        decision: PermissionDecision::Approved,
+        delay: None,
+    });
+    let mut ag = build_loop(&dir, provider, vec![], broker);
+
+    let lc = LifecycleContext {
+        run_id: run_id.clone(),
+        db_path: db_path.clone(),
+    };
+    let err = ag
+        .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
+        .await
+        .unwrap_err();
+    assert_eq!(err.reason, ErrorKind::ToolFailure);
+    assert!(err.detail.contains("prompt"), "should be prompt error");
+
+    let conn = pool::open(&db_path).unwrap();
+    let row = registry::get_run(&conn, &run_id).unwrap().unwrap();
+    assert_eq!(row.status, registry::AgentRunStatus::Error);
+    assert_eq!(row.error_taxonomy.as_deref(), Some("tool_failure"));
+    assert!(row.completed_at.is_some());
+}
+
 /// 15. file_write receives must_keep from TaskCard.compiled_intent.
 #[tokio::test]
 async fn scenario_15_must_keep_from_task_card() {
