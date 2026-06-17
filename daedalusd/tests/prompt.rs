@@ -1,0 +1,471 @@
+//! P3.1a tests — SourceProvider unit tests and full-chain integration.
+
+use daedalusd::agent::prompt::PromptBuilder;
+use daedalusd::agent::prompt_sources::{
+    AgentConfigProvider, AuthorityMapProvider, FeedbackProvider, MemoryPaths, MemoryProvider,
+    PreferencesProvider, ProjectContextProvider, SkillsProvider, SoulProvider, SourceProvider,
+    UserProvider,
+};
+use daedalusd::config::DaedalusConfig;
+use daedalusd::types::{TaskCard, TaskContext};
+
+// ── helpers ───────────────────────────────────────────────────────────
+
+fn dummy_task() -> TaskCard {
+    TaskCard {
+        schema_version: "2.8".into(),
+        task_card_id: "task-1".into(),
+        project: "test".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        status: "open".into(),
+        goal: "Fix login bug".into(),
+        compiled_intent: serde_json::json!({"action": "debug authentication"}),
+        context: TaskContext {
+            user_preferences: serde_json::json!({}),
+            project_context: daedalusd::types::ProjectContext {
+                name: "test".into(),
+                data: serde_json::json!({}),
+                global_must_avoid: vec![],
+            },
+            relevant_feedback: serde_json::json!([]),
+        },
+        execution_plan: serde_json::json!({"primary_agent": "test-agent"}),
+        acceptance_criteria: serde_json::json!({}),
+        allowed_files: vec![],
+        safety: daedalusd::types::SafetyRules {
+            allowed_paths: vec![],
+            denied_commands: vec![],
+        },
+        output_contract: serde_json::json!({}),
+        review_gate_criteria: serde_json::json!({}),
+    }
+}
+
+fn write_file(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, content).unwrap();
+    path.to_string_lossy().to_string()
+}
+
+// ── SoulProvider ──────────────────────────────────────────────────────
+
+#[test]
+fn soul_provider_present() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(&dir, "SOUL.md", "You are Daedalus.\n");
+    let p = SoulProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.unwrap().contains("You are Daedalus"));
+}
+
+#[test]
+fn soul_provider_missing_is_err() {
+    let p = SoulProvider::new("/nonexistent/soul.md");
+    let result = p.provide("ag", &dummy_task());
+    assert!(result.is_err());
+}
+
+// ── MemoryProvider ────────────────────────────────────────────────────
+
+#[test]
+fn memory_provider_present() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(&dir, "MEMORY.md", "[[user-prefs]]\nKey facts.\n");
+    let p = MemoryProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.unwrap().contains("[[user-prefs]]"));
+}
+
+#[test]
+fn memory_provider_missing_is_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("MEMORY.md").to_string_lossy().to_string();
+    let p = MemoryProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+// ── UserProvider ──────────────────────────────────────────────────────
+
+#[test]
+fn user_provider_missing_is_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("USER.md").to_string_lossy().to_string();
+    let p = UserProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+// ── PreferencesProvider ───────────────────────────────────────────────
+
+#[test]
+fn preferences_provider_valid_json() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(
+        &dir,
+        "prefs.json",
+        r#"{"preferences": {"theme": "dark", "lang": "zh"}}"#,
+    );
+    let p = PreferencesProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.unwrap().contains("dark"));
+}
+
+#[test]
+fn preferences_provider_bad_json_is_err() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(&dir, "prefs.json", "not json");
+    let p = PreferencesProvider::new(&path);
+    let result = p.provide("ag", &dummy_task());
+    assert!(result.is_err());
+}
+
+#[test]
+fn preferences_provider_missing_is_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("nope.json").to_string_lossy().to_string();
+    let p = PreferencesProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+// ── FeedbackProvider ──────────────────────────────────────────────────
+
+#[test]
+fn feedback_provider_valid_json() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(
+        &dir,
+        "feedback.json",
+        r#"[{"task_id":"t1","timestamp":"2026-01-01","feedback":"good job","category":"praise"}]"#,
+    );
+    let p = FeedbackProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    let text = result.unwrap();
+    assert!(text.contains("good job"));
+    assert!(text.contains("praise"));
+}
+
+#[test]
+fn feedback_provider_bad_json_is_err() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(&dir, "feedback.json", "garbage");
+    let p = FeedbackProvider::new(&path);
+    let result = p.provide("ag", &dummy_task());
+    assert!(result.is_err());
+}
+
+#[test]
+fn feedback_provider_missing_is_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("nope.json").to_string_lossy().to_string();
+    let p = FeedbackProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+// ── ProjectContextProvider ────────────────────────────────────────────
+
+#[test]
+fn project_context_provider_valid() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(
+        &dir,
+        "pctx.json",
+        r#"{"name": "Daedalus", "description": "Agent OS", "conventions": ["rust", "async"]}"#,
+    );
+    let p = ProjectContextProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    let text = result.unwrap();
+    assert!(text.contains("Daedalus"));
+    assert!(text.contains("rust"));
+}
+
+#[test]
+fn project_context_provider_bad_json_is_err() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(&dir, "pctx.json", "not json");
+    let p = ProjectContextProvider::new(&path);
+    let result = p.provide("ag", &dummy_task());
+    assert!(result.is_err());
+}
+
+#[test]
+fn project_context_provider_missing_is_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("nope.json").to_string_lossy().to_string();
+    let p = ProjectContextProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+// ── AuthorityMapProvider ──────────────────────────────────────────────
+
+#[test]
+fn authority_map_provider_valid_yaml() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(
+        &dir,
+        "auth.yaml",
+        "rules:\n  - tool: bash\n    risk_level: R3\n    approver: user\n",
+    );
+    let p = AuthorityMapProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    let text = result.unwrap();
+    assert!(text.contains("bash"));
+    assert!(text.contains("R3"));
+}
+
+#[test]
+fn authority_map_provider_missing_is_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("nope.yaml").to_string_lossy().to_string();
+    let p = AuthorityMapProvider::new(&path);
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn authority_map_provider_bad_yaml_is_err() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(&dir, "auth.yaml", "rules:\n  - {tool: bash");
+    let p = AuthorityMapProvider::new(&path);
+    let result = p.provide("ag", &dummy_task());
+    assert!(result.is_err());
+}
+
+// ── SkillsProvider ────────────────────────────────────────────────────
+
+fn write_skill(dir: &std::path::Path, name: &str, description: &str, body: &str) {
+    let content = format!("---\ntitle: {name}\ndescription: {description}\n---\n{body}\n");
+    std::fs::write(dir.join(format!("{name}.md")), content).unwrap();
+}
+
+#[test]
+fn skills_provider_dir_missing_is_none() {
+    let p = SkillsProvider::new("/nonexistent/skills");
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn skills_provider_no_match_is_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_skill(dir.path(), "cooking", "cooking recipes", "# Cooking");
+    let p = SkillsProvider::new(&dir.path().to_string_lossy());
+    // Task goal is "Fix login bug" — no overlap with "cooking recipes".
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn skills_provider_match_returns_body() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_skill(
+        dir.path(),
+        "debug",
+        "debug authentication",
+        "# Debug Guide\n\nUse gdb.",
+    );
+    write_skill(dir.path(), "other", "something else", "# Other");
+    let p = SkillsProvider::new(&dir.path().to_string_lossy());
+    // Goal: "Fix login bug", intent: "debug authentication"
+    // "debug" and "authentication" tokens should match.
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    let text = result.unwrap();
+    assert!(text.contains("Debug Guide"), "got: {text}");
+}
+
+#[test]
+fn skills_provider_stopwords_filtered() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_skill(
+        dir.path(),
+        "the_skill",
+        "the and this is not matching",
+        "# Body",
+    );
+    let p = SkillsProvider::new(&dir.path().to_string_lossy());
+    // All description tokens are stopwords or <3 chars → no match.
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn skills_provider_stable_sort_top5() {
+    let dir = tempfile::TempDir::new().unwrap();
+    // Create 10 skills — all have "debug" in description (same score).
+    // Sort is score desc → filename asc, so skill00..skill04 win.
+    for i in 0..10u8 {
+        let name = format!("skill{:02}", i);
+        let desc = format!("debug tool {}", i);
+        write_skill(dir.path(), &name, &desc, &format!("# Skill {i}"));
+    }
+    let p = SkillsProvider::new(&dir.path().to_string_lossy());
+    let result = p.provide("ag", &dummy_task()).unwrap();
+    let text = result.unwrap();
+    // Top 5 by filename asc.
+    for i in 0..5 {
+        assert!(
+            text.contains(&format!("# Skill {i}")),
+            "should contain Skill {i}"
+        );
+    }
+    for i in 5..10 {
+        assert!(
+            !text.contains(&format!("# Skill {i}")),
+            "should NOT contain Skill {i}"
+        );
+    }
+}
+
+// ── AgentConfigProvider ───────────────────────────────────────────────
+
+#[test]
+fn agent_config_provider_valid() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(
+        &dir,
+        "agents.yaml",
+        "agents:\n  test-agent:\n    role_summary: Tester\n    tools: [bash]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: gpt\n",
+    );
+    let p = AgentConfigProvider::new(&path);
+    let result = p.provide("test-agent", &dummy_task()).unwrap();
+    let text = result.unwrap();
+    assert!(text.contains("Tester"));
+    assert!(text.contains("bash"));
+}
+
+#[test]
+fn agent_config_provider_missing_agent_is_err() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_file(
+        &dir,
+        "agents.yaml",
+        "agents:\n  other:\n    role_summary: Other\n    tools: []\n    permission: auto\n    model_strategy:\n      primary:\n        model: x\n",
+    );
+    let p = AgentConfigProvider::new(&path);
+    let result = p.provide("test-agent", &dummy_task());
+    assert!(result.is_err());
+}
+
+// ── full chain via PromptBuilder ──────────────────────────────────────
+
+fn setup_full_chain(dir: &tempfile::TempDir) -> (PromptBuilder, String) {
+    let base = dir.path().to_string_lossy().to_string();
+    // MemoryPaths expects files under .daedalus/
+    let daedalus_dir = dir.path().join(".daedalus");
+    std::fs::create_dir_all(&daedalus_dir).unwrap();
+    let config_dir = daedalus_dir.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let skills_dir = daedalus_dir.join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+
+    // Required: SOUL.md, managed-agents.yaml
+    let soul_path = write_file(dir, "SOUL.md", "You are Daedalus.");
+    let agents_path = write_file(
+        dir,
+        "agents.yaml",
+        "agents:\n  test-agent:\n    role_summary: Tester\n    tools: [bash]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: x\n",
+    );
+
+    // Optional: MEMORY.md (MemoryPaths looks under .daedalus/)
+    std::fs::write(
+        daedalus_dir.join("MEMORY.md"),
+        "Key project facts:\n- Rust async runtime.",
+    )
+    .unwrap();
+
+    // Skills
+    write_skill(
+        &skills_dir,
+        "debug",
+        "debug authentication",
+        "# Debug\nUse gdb.",
+    );
+
+    let home = dir.path().to_string_lossy().to_string();
+    let mp = MemoryPaths::with_home(&home);
+
+    // Build DaedalusConfig that points into the temp dir.
+    let cfg = DaedalusConfig {
+        soul_path,
+        managed_agents_path: agents_path,
+        skills_dir: skills_dir.to_string_lossy().to_string(),
+        models_yaml_path: format!("{base}/models.yaml"),
+    };
+
+    // Build PromptBuilder with a custom provider chain that uses MemoryPaths::with_home
+    // (the standard PromptBuilder::new uses MemoryPaths::load() which reads env vars).
+    // We construct one manually for the integration test.
+    let providers: Vec<Box<dyn SourceProvider>> = vec![
+        Box::new(SoulProvider::new(&cfg.soul_path)),
+        Box::new(MemoryProvider::new(&mp.memory_md)),
+        Box::new(UserProvider::new(&mp.user_md)),
+        Box::new(PreferencesProvider::new(&mp.preferences)),
+        Box::new(AgentConfigProvider::new(&cfg.managed_agents_path)),
+        Box::new(FeedbackProvider::new(&mp.feedback)),
+        Box::new(ProjectContextProvider::new(&mp.project_context)),
+        Box::new(AuthorityMapProvider::new(&mp.authority_map)),
+        Box::new(SkillsProvider::new(&cfg.skills_dir)),
+    ];
+
+    let pb = PromptBuilder::with_providers(providers, cfg.managed_agents_path.clone());
+
+    let home_path = home;
+    (pb, home_path)
+}
+
+#[test]
+fn full_chain_contains_expected_labels() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (pb, _home) = setup_full_chain(&dir);
+    let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
+    assert!(prompt.contains("[soul]"));
+    assert!(prompt.contains("[memory]"));
+    assert!(prompt.contains("[agent]"));
+    assert!(prompt.contains("[skills]"));
+    assert!(prompt.contains("Daedalus"));
+    assert!(prompt.contains("Rust async"));
+    assert!(prompt.contains("Tester"));
+}
+
+#[test]
+fn full_chain_optional_providers_missing_does_not_block() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (pb, _home) = setup_full_chain(&dir);
+    // USER.md, preferences, feedback, project-context, authority-map
+    // are all missing — prompt still builds.
+    let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
+    // Must still have required sections.
+    assert!(prompt.contains("[soul]"));
+    assert!(prompt.contains("[agent]"));
+}
+
+#[test]
+fn full_chain_order_stable() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (pb, _home) = setup_full_chain(&dir);
+    let p1 = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
+    let p2 = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
+    assert_eq!(p1, p2);
+}
+
+#[test]
+fn load_agent_section_still_works() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (pb, _home) = setup_full_chain(&dir);
+    let config = pb.load_agent_section("test-agent").unwrap();
+    assert_eq!(config.role_summary, "Tester");
+    assert_eq!(config.tools, vec!["bash"]);
+    assert_eq!(config.permission, "ask_user");
+}
+
+// ── MemoryPaths ───────────────────────────────────────────────────────
+
+#[test]
+fn memory_paths_with_home_consistent() {
+    let mp = MemoryPaths::with_home("/tmp/daedalus-test");
+    assert_eq!(mp.memory_md, "/tmp/daedalus-test/.daedalus/MEMORY.md");
+    assert_eq!(mp.user_md, "/tmp/daedalus-test/.daedalus/USER.md");
+}

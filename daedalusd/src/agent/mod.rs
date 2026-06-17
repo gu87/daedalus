@@ -5,6 +5,7 @@ pub mod heartbeat;
 pub mod r#loop;
 pub mod permission;
 pub mod prompt;
+pub mod prompt_sources;
 pub mod state;
 
 /// Static metadata describing an agent's capabilities.
