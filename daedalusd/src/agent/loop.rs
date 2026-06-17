@@ -72,6 +72,8 @@ impl CancelReason {
 pub struct LifecycleContext {
     pub run_id: String,
     pub db_path: PathBuf,
+    /// P2.7: dispatch req_id, used by AwaitingPermission → PermissionBroker.
+    pub req_id: String,
 }
 
 // ── AgentLoop ───────────────────────────────────────────────────────────
@@ -462,9 +464,15 @@ impl AgentLoop {
                 } => {
                     let token = self.cancel_token.clone();
                     let cr = Arc::clone(&self.cancel_reason);
+                    // P2.7: use lc.req_id when lifecycle is active; empty string
+                    // for old tests that use FakePermissionBroker.
+                    let req_id: &str = lifecycle
+                        .as_ref()
+                        .map(|(lc, _)| lc.req_id.as_str())
+                        .unwrap_or("");
                     select! {
                         decision = self.permission_broker
-                            .request_permission(&self.agent_id, "", &tool_call) => {
+                            .request_permission(&self.agent_id, req_id, &tool_call) => {
                             match decision {
                                 Ok(PermissionDecision::Approved) => {
                                     // Execute directly to avoid re-entering

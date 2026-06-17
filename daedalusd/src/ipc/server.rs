@@ -9,35 +9,79 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tokio::net::UnixListener;
 
+use crate::daemon::DaemonContext;
 use crate::error::DaedalusError;
 use crate::ipc::peer;
 use crate::ipc::session::Session;
 
-/// Start the UDS server.
+/// Start the UDS server without daemon context (Phase 1 backward compat).
 ///
-/// - `socket_path` — filesystem path for the listening socket.
-/// - `shutdown` — future that signals the server to stop accepting new
-///   connections and begin graceful shutdown.
-///
-/// # Socket lifecycle
-///
-/// - If `socket_path` already exists the function returns
-///   [`DaedalusError::AlreadyExists`] immediately; it will **not** delete
-///   a pre-existing socket.
-/// - On successful bind the socket is created.  When `run` returns (whether
-///   normally or because of the shutdown signal) the socket file is removed.
+/// Delegates to [`run_with_context`] with a no-op context.
 pub async fn run(
     socket_path: &Path,
     shutdown: impl Future<Output = ()>,
+) -> Result<(), DaedalusError> {
+    // Build a minimal context that panics if task.dispatch is ever called
+    // (should not happen in Phase 1 smoke tests).
+    let ctx = Arc::new(DaemonContext {
+        config: crate::config::DaedalusConfig::load(),
+        db_path: PathBuf::from("/dev/null"),
+        factory: Arc::new(crate::daemon::DefaultAgentLoopFactory {
+            config: crate::config::DaedalusConfig::load(),
+        }),
+    });
+    run_inner(socket_path, shutdown, ctx).await
+}
+
+/// Start the UDS server with daemon context (P2.7).
+pub async fn run_with_context(
+    socket_path: &Path,
+    shutdown: impl Future<Output = ()>,
+    ctx: Arc<DaemonContext>,
+) -> Result<(), DaedalusError> {
+    run_inner(socket_path, shutdown, ctx).await
+}
+
+/// Test-only helper: same as [`run_with_context`] but takes an already-bound
+/// listener.  Public so that integration tests can use it.
+pub async fn run_with_listener(
+    listener: UnixListener,
+    socket_path: &Path,
+    shutdown: impl Future<Output = ()>,
+    ctx: Arc<DaemonContext>,
+) -> Result<(), DaedalusError> {
+    let mut sessions: Vec<Session> = Vec::new();
+    let accept_result = tokio::select! {
+        result = accept_loop(&listener, &mut sessions, &ctx) => Some(result),
+        _ = shutdown => None,
+    };
+    drop(listener);
+    for s in &sessions {
+        s.state.shutdown.cancel();
+    }
+    drop(sessions);
+    let _ = std::fs::remove_file(socket_path);
+    match accept_result {
+        Some(Err(e)) => Err(e),
+        _ => Ok(()),
+    }
+}
+
+// ── internals ────────────────────────────────────────────────────────
+
+async fn run_inner(
+    socket_path: &Path,
+    shutdown: impl Future<Output = ()>,
+    ctx: Arc<DaemonContext>,
 ) -> Result<(), DaedalusError> {
     if socket_path.exists() {
         return Err(DaedalusError::AlreadyExists(socket_path.to_path_buf()));
     }
 
-    // Ensure parent directory exists.
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             DaedalusError::Io(std::io::Error::other(format!(
@@ -50,13 +94,10 @@ pub async fn run(
 
     let listener = UnixListener::bind(socket_path).map_err(DaedalusError::Io)?;
 
-    // Spawn peer tasks into a JoinSet so we can abort them on shutdown.
     let mut sessions: Vec<Session> = Vec::new();
 
-    // Capture the accept-loop result so we can always clean up before
-    // propagating the error.
     let accept_result = tokio::select! {
-        result = accept_loop(&listener, &mut sessions) => {
+        result = accept_loop(&listener, &mut sessions, &ctx) => {
             Some(result)
         }
         _ = shutdown => {
@@ -71,20 +112,18 @@ pub async fn run(
     }
     drop(sessions);
 
-    // Clean up the socket we created — always, even on error.
     let _ = std::fs::remove_file(socket_path);
 
-    // Propagate accept-loop error after cleanup.
     match accept_result {
         Some(Err(e)) => Err(e),
         _ => Ok(()),
     }
 }
 
-/// Accept connections in a loop, spawning each into `peers`.
 async fn accept_loop(
     listener: &UnixListener,
     sessions: &mut Vec<Session>,
+    ctx: &Arc<DaemonContext>,
 ) -> Result<(), DaedalusError> {
     loop {
         let (stream, addr) = listener.accept().await.map_err(DaedalusError::Io)?;
@@ -93,7 +132,7 @@ async fn accept_loop(
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("unnamed"));
 
-        sessions.push(peer::spawn_session(stream, peer_addr));
+        sessions.push(peer::spawn_session(stream, peer_addr, Arc::clone(ctx)));
     }
 }
 
@@ -311,32 +350,6 @@ mod tests {
 
     // ── accept error still cleans up ───────────────────────────────
 
-    /// Test-only helper: same cleanup pattern as `run()`.  Exists solely
-    /// so we can verify the cleanup path without depending on a real
-    /// accept-loop error (which is hard to trigger portably).
-    #[cfg(test)]
-    async fn run_with_listener(
-        listener: UnixListener,
-        socket_path: &Path,
-        shutdown: impl Future<Output = ()>,
-    ) -> Result<(), DaedalusError> {
-        let mut sessions: Vec<Session> = Vec::new();
-        let accept_result = tokio::select! {
-            result = accept_loop(&listener, &mut sessions) => Some(result),
-            _ = shutdown => None,
-        };
-        drop(listener);
-        for s in &sessions {
-            s.state.shutdown.cancel();
-        }
-        drop(sessions);
-        let _ = std::fs::remove_file(socket_path);
-        match accept_result {
-            Some(Err(e)) => Err(e),
-            _ => Ok(()),
-        }
-    }
-
     #[tokio::test]
     async fn accept_error_still_cleans_up_socket() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -355,12 +368,25 @@ mod tests {
         // Bind a fresh listener for run_with_listener.
         let listener = UnixListener::bind(&path).unwrap();
 
+        let ctx = Arc::new(DaemonContext {
+            config: crate::config::DaedalusConfig::load(),
+            db_path: PathBuf::from("/dev/null"),
+            factory: Arc::new(crate::daemon::DefaultAgentLoopFactory {
+                config: crate::config::DaedalusConfig::load(),
+            }),
+        });
+
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let p = path.clone();
         let handle = tokio::spawn(async move {
-            run_with_listener(listener, &p, async {
-                let _ = rx.await;
-            })
+            run_with_listener(
+                listener,
+                &p,
+                async {
+                    let _ = rx.await;
+                },
+                ctx,
+            )
             .await
         });
 

@@ -1,6 +1,6 @@
-# P2.6 返修报告：Heartbeat + 超时 + Orphan 回收 + 生命周期接线
+# P2.7 返修完成报告：Phase 2 跨模块验收与收口
 
-> 基于 P2.5 已提交状态（commit `69c242e`），含 Codex 审查返修。
+> 基于 P2.1–P2.6 全部 [DONE] 状态，含 Codex 审查返修。
 
 ---
 
@@ -8,19 +8,34 @@
 
 | # | 问题 | 修复 |
 |:--|------|------|
-| 1 | `BuildingPrompt` 中 `build_system_prompt(...).map_err(...)?` 绕过 `LoopState::Failed` | 改为 `match { Ok => SendingToLLM, Err => Failed }` |
-| 2 | Done / Failed 分支 `let _ = spawn_blocking { ... }` 静默吞错 | 增加 4 级 eprintln warning：db open error / transition error / rows=0 / join error |
-| 3 | 缺少 prompt 失败的 lifecycle 测试 | 新增 `scenario_20_lifecycle_prompt_failure_writes_error` |
+| 1 | 缺少真实权限往返集成测试 | 新增 `full_dispatch_permission_roundtrip` |
+| 2 | 缺少 task.error 集成测试 | 新增 `full_dispatch_task_error_provider_fatal` |
+| 3 | Python `test_dispatch_success_response` 期待 stream 直接返回 | 改为 serv 先发 stream 再发 done，断言 `result["streams"][0]` + `result["done"]` |
+| 4 | `asyncio.timeout` 不兼容 Python 3.9 | 改为 `asyncio.wait_for` |
 
 ---
 
-## 2. 修改文件（3 个）
+## 2. 修改文件清单（对齐 git status）
 
-| 文件 | 变更 |
-|------|------|
-| `daedalusd/src/agent/loop.rs` | BuildingPrompt `?` → `match`；Done/Failed DB write 显式 warning |
-| `daedalusd/tests/agent_loop.rs` | 新增 scenario_20 |
-| `REVIEW.md` | 本报告 |
+| 文件 | 操作 |
+|------|:---:|
+| `Cargo.lock` | 自动更新（+ uuid） |
+| `daedalusd/Cargo.toml` | + `uuid` |
+| `daedalusd/src/lib.rs` | + `pub mod daemon` |
+| `daedalusd/src/daemon.rs` | **新增** |
+| `daedalusd/src/agent/loop.rs` | `LifecycleContext` + `req_id` |
+| `daedalusd/src/ipc/control.rs` | `route()` + `ctx`；TaskDispatch → spawn_task |
+| `daedalusd/src/ipc/peer.rs` | ctx 贯通 |
+| `daedalusd/src/ipc/server.rs` | + `run_with_context` / `run_with_listener` |
+| `daedalusd/src/main.rs` | `DaemonContext` + `run_with_context()` |
+| `daedalusd/tests/full_dispatch.rs` | **新增**（5 个集成测试） |
+| `daedalusd/tests/agent_loop.rs` | `LifecycleContext` + `req_id`（5 处） |
+| `daedalus-orch/daedalus/orch/client.py` | `dispatch()` 循环到终态 + `asyncio.wait_for` |
+| `daedalus-orch/daedalus/orch/exceptions.py` | + `from __future__ import annotations` |
+| `daedalus-orch/tests/test_client.py` | `test_dispatch_success_response` 改为 stream+done |
+| `scripts/smoke-phase2.sh` | **新增** |
+| `REVIEW.md` | P2.7 方案 + 返修 + 完成报告 |
+| `PLANS.md` | P2.7 [DONE] + 验证结果 |
 
 ---
 
@@ -28,56 +43,34 @@
 
 ```
 cargo fmt --all -- --check               ✅ 通过
-cargo test --workspace                    ✅ 254 passed, 0 failed, 1 skipped
-cargo clippy --workspace -- -D warnings   ✅ 通过
+cargo test --workspace                   ✅ 259 passed, 0 failed, 1 skipped
+cargo clippy --workspace -- -D warnings  ✅ 通过
+pytest daedalus-orch/tests/test_client.py  ✅ 17 passed, 3 skipped
 ```
 
 ### 测试分布
 
-| 测试套 | passed | 变化（vs P2.5） |
-|--------|-------:|:---:|
-| lib unit | 169 | +12 |
-| agent_loop integration | **20** | **+5**（#16-#20 lifecycle） |
-| db_registry integration | 15 | +6 |
-| permission integration | 13 | — |
-| protocol integration | 6 | — |
-| provider integration | 26 | — |
-| tool_registry integration | 5 | — |
-| **合计** | **254** | **+28** |
+| 测试套 | passed |
+|--------|-------:|
+| lib unit | 169 |
+| agent_loop integration | 20 |
+| db_registry integration | 15 |
+| full_dispatch integration | **5** |
+| permission integration | 13 |
+| protocol integration | 6 |
+| provider integration | 26 |
+| tool_registry integration | 5 |
+| **Rust 合计** | **259** |
+| **pytest** | **17** |
 
-唯一跳过：`ipc::server::tests::long_line_returns_error_and_closes`（预存，P2.6 未引入）。
+唯一跳过：`long_line_returns_error_and_closes`（预存）+ 3 个 CLI/daemon 集成（需二进制文件）。
 
----
+### full_dispatch 测试明细（5 个）
 
-## 4. 所有 lifecycle 启动后的错误路径均进入 Failed arm
-
-`run_with_lifecycle` 执行流程中，一旦 `transition_to_running` 成功 + HeartbeatLoop 启动后，以下所有可恢复错误均通过 `LoopState::Failed` 收口：
-
-| 错误来源 | 原路径 | 返修后 |
-|----------|--------|--------|
-| `build_system_prompt` 失败 | `return Err`（绕过 lifecycle） | `LoopState::Failed { ToolFailure }` |
-| `check_tool_access` 拒绝（ExecutingTool） | `return Err`（绕过 lifecycle） | `LoopState::Failed { ToolFailure }` |
-| `check_tool_access` 拒绝（AwaitingPermission） | `return Err`（绕过 lifecycle） | `LoopState::Failed { ToolFailure }` |
-| `execute_with_cancel` 失败（ExecutingTool） | `return Err`（绕过 lifecycle） | `LoopState::Failed { ... }` |
-| `execute_with_cancel` 失败（AwaitingPermission） | `return Err`（绕过 lifecycle） | `LoopState::Failed { ... }` |
-| `stream_with_cancel` 错误 | 已走 `LoopState::Failed` | 不变 |
-| `next_chunk_with_cancel` 错误 | 已走 `LoopState::Failed` | 不变 |
-| MaxIterations | 已走 `LoopState::Failed` | 不变 |
-| Cancel / Timeout（CancellationToken） | 已走 `LoopState::Failed` | 不变 |
-
-`LoopState::Failed` arm 统一执行：`hb.abort()` → `spawn_blocking` DB transition → `return Err(AgentError)`。DB 写失败不影响主返回值，仅 eprintln warning。
-
----
-
-## 5. 边界遵守
-
-| # | 规则 | 状态 |
-|:--|------|:----:|
-| 1 | 不修改 `AgentLoop::run(task, timeout)` 签名 | ✅ |
-| 2 | 不修改 `AgentRuntime` trait | ✅ |
-| 3 | `transition_to_running` 在入口立即执行 | ✅ |
-| 4 | `touch_heartbeat` 带 `WHERE status='running'` | ✅ |
-| 5 | P2.6 不负责 insert queued row | ✅ |
-| 6 | 不改 SQLite schema | ✅ |
-| 7 | 不碰 P2.5 IPC/permission/client | ✅ |
-| 8 | 不定义 ErrorCode/TaskStatus | ✅ |
+| # | 场景 | 断言 |
+|:--|------|------|
+| 1 | task.dispatch → task.done（无 tool call） | outbox.status, event_id=None |
+| 2 | event_id 透传 | ev-123 原样带回 |
+| 3 | DB lifecycle | status='done', completed_at + outbox_json |
+| 4 | **permission 往返** | permission.request req_id 匹配 → response approved → task.done → DB done |
+| 5 | **task.error** | ProviderFatal → task.error, error_taxonomy='provider_fatal', DB error |

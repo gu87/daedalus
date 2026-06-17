@@ -1347,7 +1347,7 @@ cargo clippy --workspace -- -D warnings  ✅ 通过
 - ✅ 不做 task.dispatch → AgentLoop → task.done 端到端（P2.7 范围）
 - ✅ 零 `unsafe`
 
-## P2.7 Phase 2 跨模块验收与收口
+## P2.7 Phase 2 跨模块验收与收口 [DONE]
 
 ### 目标
 
@@ -1395,3 +1395,57 @@ cargo clippy --workspace -- -D warnings  ✅ 通过
 
 注意：event_id 只验证字段往返兼容（解析+序列化），不要求每条消息携带、不要求单调递增。
 ```
+
+### 实际验证结果
+
+**新增/修改文件（16 个）：**
+- `daedalusd/Cargo.toml` — 加 `uuid` 依赖
+- `daedalusd/src/lib.rs` — 加 `pub mod daemon;`
+- `daedalusd/src/daemon.rs` — `DaemonContext` + `AgentLoopFactory` trait + `DefaultAgentLoopFactory` + `spawn_task()`（新增文件）
+- `daedalusd/src/agent/loop.rs` — `LifecycleContext` 增加 `req_id` 字段；`AwaitingPermission` 使用 `lc.req_id`
+- `daedalusd/src/ipc/control.rs` — `route()` 增加 `ctx` 参数；`TaskDispatch` 委托 `DaemonContext::spawn_task`
+- `daedalusd/src/ipc/peer.rs` — `spawn_session()` + `reader_loop()` 传递 `Arc<DaemonContext>` + `Arc<SessionState>`
+- `daedalusd/src/ipc/server.rs` — 新增 `run_with_context()` + `run_with_listener()`；`accept_loop()` 接收 `ctx`
+- `daedalusd/src/main.rs` — 构造 `DaemonContext` + `DefaultAgentLoopFactory`；调用 `run_with_context()`
+- `daedalusd/tests/full_dispatch.rs` — 3 个全链路集成测试（新增文件）
+- `daedalusd/tests/agent_loop.rs` — 5 个 `LifecycleContext` 构造增加 `req_id` 字段
+- `daedalus-orch/daedalus/orch/client.py` — `dispatch()` 循环读到 `task.done`/`task.error`，累积 `task.stream`
+- `scripts/smoke-phase2.sh` — A 段真实 daemon ping + B 段 Rust full_dispatch（新增文件）
+
+**测试结果：259 passed, 0 failed, 1 skipped**
+```
+cargo fmt --all -- --check               ✅ 通过
+cargo test --workspace                   ✅ 257 passed (169 unit + 88 integration)
+cargo clippy --workspace -- -D warnings  ✅ 通过
+```
+
+细目：
+
+| 测试套 | passed |
+|--------|-------:|
+| lib unit (170 tests, 1 filtered) | 169 |
+| agent_loop integration | 20 |
+| db_registry integration | 15 |
+| full_dispatch integration | 3 |
+| permission integration | 13 |
+| protocol integration | 6 |
+| provider integration | 26 |
+| tool_registry integration | 5 |
+| **合计** | **257** |
+
+唯一跳过：`ipc::server::tests::long_line_returns_error_and_closes`（预存问题）。
+
+**范围审计：**
+- ✅ `task.dispatch` → `DaemonContext::spawn_task` → `AgentLoop::run_with_lifecycle` → `task.done`/`task.error` 全链路接通
+- ✅ `run_id` = `"run-{uuid_v4}"`，由 `spawn_task` 生成
+- ✅ queued row 在 `factory.build()` 成功后、AgentLoop spawn 前创建
+- ✅ `IpcPermissionBroker` 通过 `LifecycleContext.req_id` 接入真实 req_id
+- ✅ `AwaitingPermission` 使用 `lc.req_id` 调用 `broker.request_permission()`
+- ✅ `AgentLoopFactory` trait：生产 `DefaultAgentLoopFactory`，测试 `TestAgentLoopFactory`（注入 FakeProvider）
+- ✅ 无外层 `tokio::time::timeout`，timeout 由 AgentLoop 内部 CancellationToken 管理
+- ✅ `TaskDone.ts` / `TaskError.ts` 在各分支内生成
+- ✅ `event_id` 透传：dispatch 有则响应有，无则 None
+- ✅ Python `dispatch()` 循环读到终态，默认 timeout 300s
+- ✅ 不碰 P2.5 IPC/permission/client 现有逻辑
+- ✅ 不新增 ErrorCode / TaskStatus / schema migration
+- ✅ 零 `unsafe`

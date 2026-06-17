@@ -1,4 +1,4 @@
-//! Peer Layer — bidirectional NDJSON session (P2.5).
+//! Peer Layer — bidirectional NDJSON session (P2.5) with daemon context (P2.7).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::daemon::DaemonContext;
 use crate::ipc::control;
 use crate::ipc::protocol;
 use crate::ipc::session::{self, Session, SessionState};
@@ -16,15 +17,16 @@ use crate::types::{Message, SystemErrorCode};
 pub(crate) const MAX_LINE_LEN: usize = 1024 * 1024;
 const WRITER_CAP: usize = 64;
 
-pub fn spawn_session(stream: UnixStream, _peer_addr: PathBuf) -> Session {
+pub fn spawn_session(stream: UnixStream, _peer_addr: PathBuf, ctx: Arc<DaemonContext>) -> Session {
     let state = Arc::new(SessionState::new());
     let (writer_tx, writer_rx) = mpsc::channel::<Message>(WRITER_CAP);
     let (reader_half, writer_half) = tokio::io::split(stream);
 
     let reader_state = Arc::clone(&state);
     let reader_tx = writer_tx.clone();
+    let reader_ctx = Arc::clone(&ctx);
     let reader_handle: JoinHandle<()> = tokio::spawn(async move {
-        reader_loop(reader_half, &reader_state, &reader_tx).await;
+        reader_loop(reader_half, &reader_ctx, &reader_state, &reader_tx).await;
         reader_state.shutdown.cancel();
         session::drain_pending(&reader_state);
     });
@@ -44,7 +46,8 @@ pub fn spawn_session(stream: UnixStream, _peer_addr: PathBuf) -> Session {
 
 async fn reader_loop(
     reader: tokio::io::ReadHalf<UnixStream>,
-    state: &SessionState,
+    ctx: &Arc<DaemonContext>,
+    state: &Arc<SessionState>,
     writer_tx: &mpsc::Sender<Message>,
 ) {
     let mut reader = BufReader::new(reader);
@@ -52,7 +55,7 @@ async fn reader_loop(
     loop {
         match read_line_limited(&mut reader, &mut line_buf).await {
             Ok(Some(text)) => {
-                control::route(state, text, writer_tx).await;
+                control::route(ctx, state, text, writer_tx).await;
                 line_buf.clear();
             }
             Ok(None) => break,

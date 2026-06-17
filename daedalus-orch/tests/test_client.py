@@ -578,21 +578,48 @@ async def test_dispatch_send_and_receive_error():
 
 @pytest.mark.asyncio
 async def test_dispatch_success_response():
-    """dispatch() accepts any response type (not just system.error)."""
+    """dispatch() reads task.stream first, then task.done — returns {done, streams}."""
     with tempfile.TemporaryDirectory() as tmp:
         sock = os.path.join(tmp, "disp2.sock")
 
         async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-            _ = await asyncio.wait_for(reader.readline(), timeout=2.0)
-            resp = json.dumps({
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            disp = json.loads(line)
+            assert disp["type"] == "task.dispatch"
+            rid = disp["req_id"]
+
+            # Send a task.stream first.
+            stream = json.dumps({
                 "type": "task.stream",
                 "ts": "2026-06-16T10:00:00.000Z",
-                "req_id": "future",
+                "req_id": rid,
                 "agent_id": "claude",
                 "task_id": "t1",
                 "chunk": "hello",
             })
-            writer.write((resp + "\n").encode())
+            writer.write((stream + "\n").encode())
+            await writer.drain()
+
+            # Then send task.done.
+            done = json.dumps({
+                "type": "task.done",
+                "ts": "2026-06-16T10:00:01.000Z",
+                "req_id": rid,
+                "agent_id": "claude",
+                "task_id": "t1",
+                "outbox": {
+                    "schema_version": "2.8",
+                    "task_id": "t1",
+                    "agent_id": "claude",
+                    "status": "waiting_for_verification",
+                    "summary": "done",
+                    "changed_files": [],
+                    "verification": {},
+                    "evidence": {},
+                    "known_risks": [],
+                },
+            })
+            writer.write((done + "\n").encode())
             await writer.drain()
             writer.close()
 
@@ -601,11 +628,16 @@ async def test_dispatch_success_response():
             client = DaedalusClient(sock)
             await client.connect()
             try:
-                resp = await client.dispatch(
+                result = await client.dispatch(
                     "claude", "t1", {"schema_version": "2.8"}, timeout=5.0
                 )
-                assert resp["type"] == "task.stream"
-                assert resp["chunk"] == "hello"
+                # P2.7: returns {"done": ..., "streams": [...]}
+                assert isinstance(result, dict)
+                assert "done" in result
+                assert "streams" in result
+                assert result["done"]["type"] == "task.done"
+                assert len(result["streams"]) == 1
+                assert result["streams"][0]["chunk"] == "hello"
             finally:
                 await client.close()
         finally:

@@ -1,5 +1,7 @@
 """Minimal exception hierarchy for the daedalusd UDS client."""
 
+from __future__ import annotations
+
 
 class DaedalusError(Exception):
     """Base for all client-side errors."""

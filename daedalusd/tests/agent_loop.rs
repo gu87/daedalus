@@ -867,6 +867,7 @@ async fn scenario_16_lifecycle_normal_done() {
     let lc = LifecycleContext {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
+        req_id: "test-req".into(),
     };
     let outbox = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
@@ -928,6 +929,7 @@ async fn scenario_17_lifecycle_timeout_writes_error() {
     let lc = LifecycleContext {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
+        req_id: "test-req".into(),
     };
     let err = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_millis(100))
@@ -1019,6 +1021,7 @@ async fn scenario_18_lifecycle_cancel_writes_cancelled() {
     let lc = LifecycleContext {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
+        req_id: "test-req".into(),
     };
     let err = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(30))
@@ -1059,6 +1062,7 @@ async fn scenario_19_lifecycle_tool_access_rejected_writes_error() {
     let lc = LifecycleContext {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
+        req_id: "test-req".into(),
     };
     let err = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
@@ -1090,6 +1094,7 @@ async fn scenario_20_lifecycle_prompt_failure_writes_error() {
     let lc = LifecycleContext {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
+        req_id: "test-req".into(),
     };
     let err = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))

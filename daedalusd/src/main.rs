@@ -1,12 +1,14 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-/// Orphan scan runs every 60 s.  Phase 4 may make this configurable.
+use daedalusd::daemon::{DaemonContext, DefaultAgentLoopFactory};
+
+/// Orphan scan runs every 60 s.
 const ORPHAN_SCAN_INTERVAL_SECS: u64 = 60;
-/// Runs whose heartbeat is older than this threshold (90 s = 3× heartbeat
-/// interval) are considered orphaned.
+/// Runs whose heartbeat is older than this threshold (90 s) are orphaned.
 const ORPHAN_CUTOFF_SECS: i64 = 90;
 
 #[tokio::main]
@@ -30,6 +32,14 @@ async fn main() {
     }
 
     let db_path = state_dir.join("daedalusd.sqlite");
+
+    // ── daemon context (P2.7) ──────────────────────────────────────
+    let config = daedalusd::config::DaedalusConfig::load();
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory: Arc::new(DefaultAgentLoopFactory { config }),
+    });
 
     // ── shared shutdown token ──────────────────────────────────────
     let shutdown_token = CancellationToken::new();
@@ -66,9 +76,7 @@ async fn main() {
                         Ok(Err(e)) => {
                             eprintln!("daedalusd orphan scan error: {e}");
                         }
-                        Err(_) => {
-                            // spawn_blocking join error — ignore.
-                        }
+                        Err(_) => {}
                         _ => {}
                     }
                 }
@@ -78,9 +86,8 @@ async fn main() {
     });
 
     // ── IPC server ─────────────────────────────────────────────────
-    eprintln!("daedalusd v0.1.0 starting on {}", socket_path.display());
+    eprintln!("daedalusd v0.2.0 starting on {}", socket_path.display());
 
-    // Signal handlers → cancel shutdown token.
     let signal_token = shutdown_token.clone();
     tokio::spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
@@ -99,7 +106,7 @@ async fn main() {
 
     let shutdown = shutdown_token.cancelled();
 
-    match daedalusd::ipc::server::run(&socket_path, shutdown).await {
+    match daedalusd::ipc::server::run_with_context(&socket_path, shutdown, ctx).await {
         Ok(()) => eprintln!("daedalusd shut down cleanly"),
         Err(e) => {
             eprintln!("daedalusd fatal: {}", e);

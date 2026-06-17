@@ -1,12 +1,21 @@
-//! Control Plane — async routing with session state (P2.5).
+//! Control Plane — async routing with session state (P2.5) and
+//! daemon context (P2.7).
+
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::daemon::DaemonContext;
 use crate::ipc::protocol;
 use crate::ipc::session::SessionState;
 use crate::types::{Message, SystemErrorCode};
 
-pub async fn route(state: &SessionState, text: &str, writer_tx: &mpsc::Sender<Message>) {
+pub async fn route(
+    ctx: &Arc<DaemonContext>,
+    state: &Arc<SessionState>,
+    text: &str,
+    writer_tx: &mpsc::Sender<Message>,
+) {
     let response = match protocol::parse_message(text) {
         Ok(msg) => {
             match msg {
@@ -51,11 +60,12 @@ pub async fn route(state: &SessionState, text: &str, writer_tx: &mpsc::Sender<Me
                     Some(sr.req_id.clone()),
                     "session.rejoin replay not implemented in Phase 2".into(),
                 )),
-                Message::TaskDispatch(ref td) => Some(protocol::make_error(
-                    SystemErrorCode::InvalidMessage,
-                    Some(td.req_id.clone()),
-                    "task.dispatch not implemented in Phase 2".into(),
-                )),
+                Message::TaskDispatch(ref td) => {
+                    // P2.7: delegate to DaemonContext.
+                    let writer_tx = writer_tx.clone();
+                    let session_state = Arc::clone(state);
+                    ctx.spawn_task(td, writer_tx, session_state).await
+                }
                 Message::TaskStream(_)
                 | Message::TaskDone(_)
                 | Message::TaskError(_)
@@ -72,12 +82,39 @@ pub async fn route(state: &SessionState, text: &str, writer_tx: &mpsc::Sender<Me
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::AgentLoopFactory;
     use crate::ipc::session::{PendingPerm, SessionState};
     use crate::types::{PermissionDecision, PermissionResponse, SessionRejoin, TaskDispatch};
     use std::sync::Arc;
 
-    fn make_state() -> SessionState {
-        SessionState::new()
+    fn make_state() -> Arc<SessionState> {
+        Arc::new(SessionState::new())
+    }
+
+    /// Minimal test factory — never actually called in control tests.
+    struct StubFactory;
+    impl AgentLoopFactory for StubFactory {
+        fn build(
+            &self,
+            _agent_id: String,
+            _perm_broker: Arc<dyn crate::agent::permission::PermissionBroker>,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<crate::agent::r#loop::AgentLoop, crate::error::DaedalusError> {
+            unimplemented!("stub")
+        }
+    }
+
+    fn make_ctx() -> Arc<DaemonContext> {
+        Arc::new(DaemonContext {
+            config: crate::config::DaedalusConfig {
+                soul_path: "/dev/null".into(),
+                managed_agents_path: "/dev/null".into(),
+                skills_dir: "/dev/null".into(),
+                models_yaml_path: "/dev/null".into(),
+            },
+            db_path: std::path::PathBuf::from("/dev/null"),
+            factory: Arc::new(StubFactory),
+        })
     }
 
     fn make_writer() -> (mpsc::Sender<Message>, mpsc::Receiver<Message>) {
@@ -100,6 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn permission_response_req_id_mismatch_keeps_pending() {
+        let ctx = make_ctx();
         let state = make_state();
         insert_pending(&state, "perm-1", "real-req");
 
@@ -113,7 +151,7 @@ mod tests {
         })
         .to_string();
 
-        route(&state, &json, &tx).await;
+        route(&ctx, &state, &json, &tx).await;
 
         // 1. Pending must still exist (NOT removed).
         {
@@ -135,6 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn permission_response_match_after_mismatch_still_works() {
+        let ctx = make_ctx();
         let state = make_state();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         state.pending_permissions.lock().unwrap().insert(
@@ -156,8 +195,7 @@ mod tests {
             "decision": "approved"
         })
         .to_string();
-        route(&state, &json_wrong, &tx).await;
-        // Drain the error.
+        route(&ctx, &state, &json_wrong, &tx).await;
         let _err = rx.try_recv().unwrap();
 
         // Second: correct match.
@@ -169,13 +207,11 @@ mod tests {
             "decision": "approved"
         })
         .to_string();
-        route(&state, &json_right, &tx).await;
+        route(&ctx, &state, &json_right, &tx).await;
 
-        // The oneshot should receive Approved.
         let decision = resp_rx.await.unwrap();
         assert_eq!(decision, PermissionDecision::Approved);
 
-        // Pending map must be empty.
         let map = state.pending_permissions.lock().unwrap();
         assert!(map.is_empty());
     }
@@ -184,6 +220,29 @@ mod tests {
 
     #[tokio::test]
     async fn task_dispatch_not_implemented_returns_req_id() {
+        // This test verifies behaviour when the factory rejects (our stub
+        // panics, so we use a real-ish factory that returns an error).
+        struct ErrFactory;
+        impl AgentLoopFactory for ErrFactory {
+            fn build(
+                &self,
+                _agent_id: String,
+                _perm_broker: Arc<dyn crate::agent::permission::PermissionBroker>,
+                _cancel: tokio_util::sync::CancellationToken,
+            ) -> Result<crate::agent::r#loop::AgentLoop, crate::error::DaedalusError> {
+                Err(crate::error::DaedalusError::Protocol("stub error".into()))
+            }
+        }
+        let ctx = Arc::new(DaemonContext {
+            config: crate::config::DaedalusConfig {
+                soul_path: "/dev/null".into(),
+                managed_agents_path: "/dev/null".into(),
+                skills_dir: "/dev/null".into(),
+                models_yaml_path: "/dev/null".into(),
+            },
+            db_path: std::path::PathBuf::from("/dev/null"),
+            factory: Arc::new(ErrFactory),
+        });
         let state = make_state();
         let (tx, mut rx) = make_writer();
         let json = serde_json::json!({
@@ -205,7 +264,7 @@ mod tests {
                     "project_context": {"name": "p", "data": {}, "global_must_avoid": []},
                     "relevant_feedback": {}
                 },
-                "execution_plan": {},
+                "execution_plan": {"primary_agent": "claude"},
                 "acceptance_criteria": {},
                 "allowed_files": [],
                 "safety": {"allowed_paths": [], "denied_commands": []},
@@ -215,13 +274,13 @@ mod tests {
         })
         .to_string();
 
-        route(&state, &json, &tx).await;
+        route(&ctx, &state, &json, &tx).await;
 
         let resp = rx.try_recv().expect("must receive system.error");
         match resp {
             Message::SystemError(e) => {
                 assert_eq!(e.error, SystemErrorCode::InvalidMessage);
-                assert!(e.detail.contains("task.dispatch"));
+                assert!(e.detail.contains("failed to build AgentLoop"));
                 assert_eq!(e.req_id.as_deref(), Some("my-dispatch-req"));
             }
             _ => panic!("expected SystemError, got {:?}", resp),
@@ -230,17 +289,19 @@ mod tests {
 
     #[tokio::test]
     async fn session_rejoin_not_implemented_returns_req_id() {
+        let ctx = make_ctx();
         let state = make_state();
         let (tx, mut rx) = make_writer();
         let json = serde_json::json!({
             "type": "session.rejoin",
             "ts": "2026-06-15T10:00:00.000Z",
             "req_id": "my-rejoin-req",
-            "task_id": "t1"
+            "task_id": "t1",
+            "last_event_id": "ev-1"
         })
         .to_string();
 
-        route(&state, &json, &tx).await;
+        route(&ctx, &state, &json, &tx).await;
 
         let resp = rx.try_recv().expect("must receive system.error");
         match resp {

@@ -99,18 +99,16 @@ class DaedalusClient:
         task_card: dict[str, Any],
         *,
         permission_handler: PermissionHandler | None = None,
-        timeout: float = 30.0,
+        timeout: float = 300.0,
     ) -> dict[str, Any]:
-        """Send `task.dispatch` (P2.5 prototype).
+        """Send `task.dispatch` (P2.7).
 
-        In P2.5 the daemon may interleave ``permission.request`` messages
-        while processing.  If *permission_handler* is provided it is called
-        with the request dict and must return ``"approved"`` or ``"denied"``.
-        Without a handler, ``permission.request`` is answered with ``"denied"``
-        automatically.
+        Reads responses in a loop until ``task.done`` or ``task.error``.
+        ``permission.request`` messages are answered inline (denied by
+        default).  ``task.stream`` chunks are accumulated into ``streams``.
 
-        The first non-permission response (``system.error``, ``task.stream``,
-        ``task.done``, ``task.error``, etc.) is returned.
+        Returns ``{"done": ..., "streams": [...]}`` on success.
+        Raises ``DaedalusClientError`` on ``task.error`` or ``system.error``.
         """
         if self._reader is None or self._writer is None:
             raise DaedalusConnectionError("not connected")
@@ -128,11 +126,12 @@ class DaedalusClient:
         self._writer.write(line.encode("utf-8"))
         await self._writer.drain()
 
-        # Read responses until we get a non-permission message.
+        streams: list[dict[str, Any]] = []
         while True:
             try:
-                async with asyncio.timeout(timeout):
-                    raw = await self._reader.readline()
+                raw = await asyncio.wait_for(
+                    self._reader.readline(), timeout=timeout
+                )
             except asyncio.TimeoutError:
                 raise DaedalusTimeoutError(
                     f"dispatch {req_id} timed out after {timeout}s"
@@ -151,7 +150,6 @@ class DaedalusClient:
             msg_type = obj.get("type")
 
             if msg_type == "permission.request":
-                # Handle permission inline.
                 decision = (
                     permission_handler(obj)
                     if permission_handler is not None
@@ -168,7 +166,30 @@ class DaedalusClient:
                 await self._writer.drain()
                 continue
 
-            # First non-permission response — return it.
+            if msg_type == "task.stream":
+                streams.append(obj)
+                continue
+
+            if msg_type == "task.done":
+                resp_req_id = obj.get("req_id")
+                if resp_req_id != req_id:
+                    raise DaedalusProtocolError(
+                        f"req_id mismatch: expected {req_id}, got {resp_req_id}"
+                    )
+                return {"done": obj, "streams": streams}
+
+            if msg_type == "task.error":
+                resp_req_id = obj.get("req_id")
+                if resp_req_id != req_id:
+                    raise DaedalusProtocolError(
+                        f"req_id mismatch: expected {req_id}, got {resp_req_id}"
+                    )
+                raise DaedalusClientError(
+                    error=obj.get("error_taxonomy", "unknown"),
+                    detail=obj.get("detail", ""),
+                    req_id=resp_req_id,
+                )
+
             if msg_type == "system.error":
                 error_code = obj.get("error")
                 detail = obj.get("detail", "")
@@ -193,9 +214,15 @@ class DaedalusClient:
                     error=error_code, detail=detail, req_id=resp_req_id
                 )
 
-            return obj
-
     # -- internals -------------------------------------------------------
+
+    async def _do_write_and_read(self, line: str) -> bytes:
+        """Write one NDJSON line and read the next response line."""
+        assert self._writer is not None and self._reader is not None
+        self._writer.write(line.encode("utf-8"))
+        await self._writer.drain()
+        raw = await self._reader.readline()
+        return raw
 
     async def _send_and_read(
         self,
@@ -209,10 +236,10 @@ class DaedalusClient:
         line = json.dumps(msg, ensure_ascii=False) + "\n"
 
         try:
-            async with asyncio.timeout(timeout):
-                self._writer.write(line.encode("utf-8"))
-                await self._writer.drain()
-                raw = await self._reader.readline()
+            raw = await asyncio.wait_for(
+                self._do_write_and_read(line),
+                timeout=timeout,
+            )
         except asyncio.TimeoutError:
             raise DaedalusTimeoutError(
                 f"request {req_id} timed out after {timeout}s"
