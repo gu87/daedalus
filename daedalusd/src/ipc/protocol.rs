@@ -95,6 +95,20 @@ impl ProtocolError {
 
 // ── internal helpers ────────────────────────────────────────────────
 
+/// Validate `event_id` when present: `Some("")` is rejected, `None` and
+/// `Some(non-empty)` are fine.
+fn validate_event_id(event_id: Option<&str>) -> Result<(), ProtocolError> {
+    if let Some("") = event_id {
+        Err(ProtocolError {
+            code: SystemErrorCode::InvalidMessage,
+            req_id: None,
+            detail: "event_id must not be empty when present".into(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Extract `req_id` from an already-parsed JSON Value, returning `None`
 /// when the field is absent, not a string, or an empty string.
 fn extract_req_id(value: &Value) -> Option<String> {
@@ -138,7 +152,16 @@ fn parse_value(value: Value) -> Result<Message, ProtocolError> {
     // Guard: type must be in the known set.
     if !matches!(
         type_str.as_str(),
-        "system.ping" | "system.pong" | "system.error"
+        "system.ping"
+            | "system.pong"
+            | "system.error"
+            | "task.dispatch"
+            | "task.stream"
+            | "task.done"
+            | "task.error"
+            | "permission.request"
+            | "permission.response"
+            | "session.rejoin"
     ) {
         return Err(ProtocolError {
             code: SystemErrorCode::UnknownMessageType,
@@ -225,14 +248,113 @@ fn validate_message(msg: &Message) -> Result<(), ProtocolError> {
             }
             Ok(())
         }
-        Message::TaskDispatch(_)
-        | Message::TaskStream(_)
-        | Message::TaskDone(_)
-        | Message::TaskError(_)
-        | Message::PermissionRequest(_)
-        | Message::PermissionResponse(_)
-        | Message::SessionRejoin(_) => {
-            Ok(()) // Phase 2+3: no additional validation for now
+        Message::TaskDispatch(td) => {
+            validate_event_id(td.event_id.as_deref())?;
+            if td.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "task.dispatch: 'req_id' must not be empty".into(),
+                });
+            }
+            Ok(())
+        }
+        Message::TaskStream(ts) => {
+            validate_event_id(ts.event_id.as_deref())?;
+            if ts.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "task.stream: 'req_id' must not be empty".into(),
+                });
+            }
+            Ok(())
+        }
+        Message::TaskDone(td) => {
+            validate_event_id(td.event_id.as_deref())?;
+            if td.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "task.done: 'req_id' must not be empty".into(),
+                });
+            }
+            Ok(())
+        }
+        Message::TaskError(te) => {
+            validate_event_id(te.event_id.as_deref())?;
+            if te.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "task.error: 'req_id' must not be empty".into(),
+                });
+            }
+            Ok(())
+        }
+        Message::PermissionRequest(pr) => {
+            validate_event_id(pr.event_id.as_deref())?;
+            if pr.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "permission.request: 'req_id' must not be empty".into(),
+                });
+            }
+            if pr.permission_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "permission.request: 'permission_id' must not be empty".into(),
+                });
+            }
+            Ok(())
+        }
+        Message::PermissionResponse(pr) => {
+            validate_event_id(pr.event_id.as_deref())?;
+            if pr.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(pr.req_id.clone()),
+                    detail: "permission.response: 'req_id' must not be empty".into(),
+                });
+            }
+            if pr.permission_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(pr.req_id.clone()),
+                    detail: "permission.response: 'permission_id' must not be empty".into(),
+                });
+            }
+            Ok(())
+        }
+        Message::SessionRejoin(sr) => {
+            if sr.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "session.rejoin: 'req_id' must not be empty".into(),
+                });
+            }
+            if sr.task_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(sr.req_id.clone()),
+                    detail: "session.rejoin: 'task_id' must not be empty".into(),
+                });
+            }
+            match &sr.last_event_id {
+                Some(eid) if eid.is_empty() => {
+                    return Err(ProtocolError {
+                        code: SystemErrorCode::InvalidMessage,
+                        req_id: Some(sr.req_id.clone()),
+                        detail: "session.rejoin: 'last_event_id' must not be empty if present"
+                            .into(),
+                    });
+                }
+                _ => {}
+            }
+            Ok(())
         }
     }
 }
@@ -242,7 +364,7 @@ fn validate_message(msg: &Message) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{SystemErrorCode, SystemPing};
+    use crate::types::{PermissionDecision, SystemErrorCode, SystemPing};
 
     // ── happy-path roundtrips ──────────────────────────────────────
 
@@ -499,11 +621,10 @@ mod tests {
 
     #[test]
     fn unknown_message_type() {
-        let json =
-            r#"{"type":"task.dispatch","ts":"2026-06-15T10:00:00.000Z","agent_id":"claude"}"#;
+        let json = r#"{"type":"not.a.real.type","ts":"2026-06-15T10:00:00.000Z","req_id":"r1"}"#;
         let err = parse_message(json).unwrap_err();
         assert_eq!(err.code, SystemErrorCode::UnknownMessageType);
-        assert!(err.detail.contains("task.dispatch"));
+        assert!(err.detail.contains("not.a.real.type"));
     }
 
     #[test]
@@ -643,5 +764,198 @@ mod tests {
         let err = result.unwrap_err();
         assert!(!err.detail.contains("{{{"));
         assert!(err.detail.len() < 100);
+    }
+
+    // ── Phase 2: event_id validation ─────────────────────────────────
+
+    #[test]
+    fn event_id_some_empty_rejected_on_phase2() {
+        // event_id on a Phase 2 message: Some("") must be rejected.
+        let json = r#"{"type":"permission.response","ts":"2026-06-15T10:00:00.000Z","event_id":"","permission_id":"perm-1","req_id":"r1","decision":"approved"}"#;
+        let err = parse_message(json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+        assert!(err.detail.contains("event_id"));
+    }
+
+    #[test]
+    fn ping_without_event_id_still_parses() {
+        // Phase 1 messages never had event_id; they parse fine without it.
+        let json = r#"{"type":"system.ping","ts":"2026-06-15T10:00:00.000Z","req_id":"r1"}"#;
+        assert!(parse_message(json).is_ok());
+    }
+
+    // ── Phase 2: task.dispatch ──────────────────────────────────────
+
+    #[test]
+    fn task_dispatch_missing_req_id_rejected() {
+        // `req_id: String` is required by serde — missing field → deserialization failure.
+        let card = r#"{"schema_version":"2.8","task_card_id":"t1","project":"p","created_at":"2026-01-01T00:00:00Z","status":"open","goal":"g","compiled_intent":{},"context":{"user_preferences":{},"project_context":{"name":"p","data":{},"global_must_avoid":[]},"relevant_feedback":{}},"execution_plan":{},"acceptance_criteria":{},"allowed_files":[],"safety":{"allowed_paths":[],"denied_commands":[]},"output_contract":{},"review_gate_criteria":{}}"#;
+        let json = format!(
+            r#"{{"type":"task.dispatch","ts":"2026-06-15T10:00:00.000Z","agent_id":"claude","task_id":"t1","task_card":{}}}"#,
+            card
+        );
+        let err = parse_message(&json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+    }
+
+    #[test]
+    fn task_dispatch_empty_req_id_rejected() {
+        // Use a valid task_card so serde succeeds; validation then catches empty req_id.
+        let card = r#"{"schema_version":"2.8","task_card_id":"t1","project":"p","created_at":"2026-01-01T00:00:00Z","status":"open","goal":"g","compiled_intent":{},"context":{"user_preferences":{},"project_context":{"name":"p","data":{},"global_must_avoid":[]},"relevant_feedback":{}},"execution_plan":{},"acceptance_criteria":{},"allowed_files":[],"safety":{"allowed_paths":[],"denied_commands":[]},"output_contract":{},"review_gate_criteria":{}}"#;
+        let json = format!(
+            r#"{{"type":"task.dispatch","ts":"2026-06-15T10:00:00.000Z","req_id":"","agent_id":"claude","task_id":"t1","task_card":{}}}"#,
+            card
+        );
+        let err = parse_message(&json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+        assert!(err.detail.contains("req_id"));
+    }
+
+    #[test]
+    fn task_dispatch_valid_roundtrip() {
+        let json = concat!(
+            r#"{"type":"task.dispatch","ts":"2026-06-15T10:00:00.000Z","#,
+            r#""event_id":"ev-1","req_id":"r1","agent_id":"claude","#,
+            r#""task_id":"t1","task_card":{"schema_version":"2.8","#,
+            r#""task_card_id":"t1","project":"test","created_at":"2026-01-01T00:00:00Z","#,
+            r#""status":"open","goal":"test","compiled_intent":{},"context":{"user_preferences":{},"#,
+            r#""project_context":{"name":"p","data":{},"global_must_avoid":[]},"#,
+            r#""relevant_feedback":{}},"execution_plan":{},"acceptance_criteria":{},"#,
+            r#""allowed_files":[],"safety":{"allowed_paths":[],"denied_commands":[]},"#,
+            r#""output_contract":{},"review_gate_criteria":{}}}"#
+        );
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::TaskDispatch(td) => {
+                assert_eq!(td.req_id, "r1");
+                assert_eq!(td.event_id.as_deref(), Some("ev-1"));
+                assert_eq!(td.agent_id, "claude");
+                assert_eq!(td.task_id, "t1");
+            }
+            _ => panic!("expected TaskDispatch"),
+        }
+    }
+
+    // ── Phase 2: permission.request / permission.response ────────────
+
+    #[test]
+    fn permission_request_valid() {
+        let json = r#"{"type":"permission.request","ts":"2026-06-15T10:00:00.000Z","permission_id":"perm-1","req_id":"r1","agent_id":"claude","tool":"bash","args":{}}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::PermissionRequest(pr) => {
+                assert_eq!(pr.permission_id, "perm-1");
+                assert_eq!(pr.req_id, "r1");
+            }
+            _ => panic!("expected PermissionRequest"),
+        }
+    }
+
+    #[test]
+    fn permission_request_empty_req_id_rejected() {
+        let json = r#"{"type":"permission.request","ts":"2026-06-15T10:00:00.000Z","permission_id":"perm-1","req_id":"","agent_id":"claude","tool":"bash","args":{}}"#;
+        let err = parse_message(json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+        assert!(err.detail.contains("req_id"));
+    }
+
+    #[test]
+    fn permission_request_empty_permission_id_rejected() {
+        let json = r#"{"type":"permission.request","ts":"2026-06-15T10:00:00.000Z","permission_id":"","req_id":"r1","agent_id":"claude","tool":"bash","args":{}}"#;
+        let err = parse_message(json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+        assert!(err.detail.contains("permission_id"));
+    }
+
+    #[test]
+    fn permission_response_valid() {
+        let json = r#"{"type":"permission.response","ts":"2026-06-15T10:00:00.000Z","permission_id":"perm-1","req_id":"r1","decision":"approved"}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::PermissionResponse(pr) => {
+                assert_eq!(pr.permission_id, "perm-1");
+                assert_eq!(pr.req_id, "r1");
+                assert_eq!(pr.decision, PermissionDecision::Approved);
+            }
+            _ => panic!("expected PermissionResponse"),
+        }
+    }
+
+    #[test]
+    fn permission_response_empty_req_id_rejected() {
+        let json = r#"{"type":"permission.response","ts":"2026-06-15T10:00:00.000Z","permission_id":"perm-1","req_id":"","decision":"approved"}"#;
+        let err = parse_message(json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+        assert!(err.detail.contains("req_id"));
+    }
+
+    // ── Phase 2: session.rejoin ──────────────────────────────────────
+
+    #[test]
+    fn session_rejoin_valid_without_last_event_id() {
+        let json = r#"{"type":"session.rejoin","ts":"2026-06-15T10:00:00.000Z","req_id":"r1","task_id":"t1"}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::SessionRejoin(sr) => {
+                assert_eq!(sr.req_id, "r1");
+                assert_eq!(sr.task_id, "t1");
+                assert_eq!(sr.last_event_id, None);
+            }
+            _ => panic!("expected SessionRejoin"),
+        }
+    }
+
+    #[test]
+    fn session_rejoin_valid_with_last_event_id() {
+        let json = r#"{"type":"session.rejoin","ts":"2026-06-15T10:00:00.000Z","req_id":"r1","task_id":"t1","last_event_id":"ev-99"}"#;
+        let msg = parse_message(json).unwrap();
+        match msg {
+            Message::SessionRejoin(sr) => {
+                assert_eq!(sr.last_event_id.as_deref(), Some("ev-99"));
+            }
+            _ => panic!("expected SessionRejoin"),
+        }
+    }
+
+    #[test]
+    fn session_rejoin_empty_req_id_rejected() {
+        let json = r#"{"type":"session.rejoin","ts":"2026-06-15T10:00:00.000Z","req_id":"","task_id":"t1"}"#;
+        let err = parse_message(json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+        assert!(err.detail.contains("req_id"));
+    }
+
+    #[test]
+    fn session_rejoin_empty_task_id_rejected() {
+        let json = r#"{"type":"session.rejoin","ts":"2026-06-15T10:00:00.000Z","req_id":"r1","task_id":""}"#;
+        let err = parse_message(json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+        assert!(err.detail.contains("task_id"));
+    }
+
+    #[test]
+    fn session_rejoin_last_event_id_empty_rejected() {
+        let json = r#"{"type":"session.rejoin","ts":"2026-06-15T10:00:00.000Z","req_id":"r1","task_id":"t1","last_event_id":""}"#;
+        let err = parse_message(json).unwrap_err();
+        assert_eq!(err.code, SystemErrorCode::InvalidMessage);
+        assert!(err.detail.contains("last_event_id"));
+    }
+
+    // ── Phase 2: event_id on Phase 2 types ───────────────────────────
+
+    #[test]
+    fn event_id_roundtrip_preserved() {
+        // PermissionResponse with event_id.
+        let json = r#"{"type":"permission.response","ts":"2026-06-15T10:00:00.000Z","event_id":"ev-100","permission_id":"perm-1","req_id":"r1","decision":"approved"}"#;
+        let msg = parse_message(json).unwrap();
+        let out = serialize_message(&msg).unwrap();
+        let msg2 = parse_message(&out).unwrap();
+        match msg2 {
+            Message::PermissionResponse(pr) => {
+                assert_eq!(pr.event_id.as_deref(), Some("ev-100"));
+                assert_eq!(pr.decision, PermissionDecision::Approved);
+            }
+            _ => panic!("expected PermissionResponse"),
+        }
     }
 }

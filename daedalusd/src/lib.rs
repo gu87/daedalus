@@ -1,4 +1,8 @@
+pub mod agent;
+pub mod config;
 pub mod db;
 pub mod error;
 pub mod ipc;
+pub mod llm;
+pub mod tools;
 pub mod types;

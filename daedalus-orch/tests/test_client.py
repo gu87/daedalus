@@ -529,3 +529,276 @@ async def test_real_daemon_ping_pong():
 
             await asyncio.sleep(0.2)
             assert not os.path.exists(sock), "daemon did not clean up socket"
+
+
+# ── P2.5: dispatch() prototype ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatch_send_and_receive_error():
+    """dispatch() sends task.dispatch; system.error raises DaedalusClientError."""
+    with tempfile.TemporaryDirectory() as tmp:
+        sock = os.path.join(tmp, "disp.sock")
+
+        async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            obj = json.loads(line)
+            assert obj["type"] == "task.dispatch"
+            assert obj["agent_id"] == "claude"
+            assert obj["task_id"] == "t-disp"
+            # P2.5: daemon returns system.error (not implemented).
+            resp = json.dumps({
+                "type": "system.error",
+                "ts": "2026-06-16T10:00:00.000Z",
+                "req_id": obj["req_id"],
+                "error": "invalid_message",
+                "detail": "task.dispatch not implemented in Phase 2",
+            })
+            writer.write((resp + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        srv = await asyncio.start_unix_server(_handler, path=sock)
+        try:
+            client = DaedalusClient(sock)
+            await client.connect()
+            try:
+                with pytest.raises(DaedalusClientError) as exc_info:
+                    await client.dispatch(
+                        "claude", "t-disp", {"schema_version": "2.8"}, timeout=5.0
+                    )
+                assert exc_info.value.error == "invalid_message"
+                assert "not implemented" in exc_info.value.detail
+            finally:
+                await client.close()
+        finally:
+            srv.close()
+            await srv.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_success_response():
+    """dispatch() accepts any response type (not just system.error)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        sock = os.path.join(tmp, "disp2.sock")
+
+        async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            _ = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            resp = json.dumps({
+                "type": "task.stream",
+                "ts": "2026-06-16T10:00:00.000Z",
+                "req_id": "future",
+                "agent_id": "claude",
+                "task_id": "t1",
+                "chunk": "hello",
+            })
+            writer.write((resp + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        srv = await asyncio.start_unix_server(_handler, path=sock)
+        try:
+            client = DaedalusClient(sock)
+            await client.connect()
+            try:
+                resp = await client.dispatch(
+                    "claude", "t1", {"schema_version": "2.8"}, timeout=5.0
+                )
+                assert resp["type"] == "task.stream"
+                assert resp["chunk"] == "hello"
+            finally:
+                await client.close()
+        finally:
+            srv.close()
+            await srv.wait_closed()
+
+
+# ── P2.5: permission handler ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_permission_handler_approved():
+    """dispatch() with a permission_handler that returns 'approved'."""
+    with tempfile.TemporaryDirectory() as tmp:
+        sock = os.path.join(tmp, "perm.sock")
+
+        async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            # Read the task.dispatch.
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            disp = json.loads(line)
+            assert disp["type"] == "task.dispatch"
+
+            # Send a permission.request.
+            req = json.dumps({
+                "type": "permission.request",
+                "ts": "2026-06-16T10:00:00.000Z",
+                "permission_id": "perm-1",
+                "req_id": disp["req_id"],
+                "agent_id": "claude",
+                "tool": "bash",
+                "args": {"cmd": "ls"},
+            })
+            writer.write((req + "\n").encode())
+            await writer.drain()
+
+            # Read the permission.response — must be "approved".
+            resp = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            pr = json.loads(resp)
+            assert pr["type"] == "permission.response"
+            assert pr["decision"] == "approved"
+            assert pr["permission_id"] == "perm-1"
+
+            # Send terminal system.error to end dispatch loop.
+            term = json.dumps({
+                "type": "system.error",
+                "ts": "2026-06-16T10:00:00.000Z",
+                "req_id": disp["req_id"],
+                "error": "invalid_message",
+                "detail": "task.dispatch not implemented in Phase 2",
+            })
+            writer.write((term + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        srv = await asyncio.start_unix_server(_handler, path=sock)
+        try:
+            client = DaedalusClient(sock)
+            await client.connect()
+            try:
+                with pytest.raises(DaedalusClientError) as exc_info:
+                    await client.dispatch(
+                        "claude",
+                        "t1",
+                        {"schema_version": "2.8"},
+                        permission_handler=lambda _req: "approved",
+                        timeout=5.0,
+                    )
+                assert exc_info.value.error == "invalid_message"
+            finally:
+                await client.close()
+        finally:
+            srv.close()
+            await srv.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_permission_handler_denied():
+    """dispatch() with a permission_handler that returns 'denied'."""
+    with tempfile.TemporaryDirectory() as tmp:
+        sock = os.path.join(tmp, "perm-deny.sock")
+
+        async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            disp = json.loads(line)
+            assert disp["type"] == "task.dispatch"
+
+            # Send permission.request.
+            req = json.dumps({
+                "type": "permission.request",
+                "ts": "2026-06-16T10:00:00.000Z",
+                "permission_id": "perm-2",
+                "req_id": disp["req_id"],
+                "agent_id": "claude",
+                "tool": "bash",
+                "args": {"cmd": "rm -rf /"},
+            })
+            writer.write((req + "\n").encode())
+            await writer.drain()
+
+            # Read response — must be "denied".
+            resp = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            pr = json.loads(resp)
+            assert pr["decision"] == "denied"
+
+            # Send terminal.
+            term = json.dumps({
+                "type": "system.error",
+                "ts": "2026-06-16T10:00:00.000Z",
+                "req_id": disp["req_id"],
+                "error": "invalid_message",
+                "detail": "not implemented",
+            })
+            writer.write((term + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        srv = await asyncio.start_unix_server(_handler, path=sock)
+        try:
+            client = DaedalusClient(sock)
+            await client.connect()
+            try:
+                with pytest.raises(DaedalusClientError):
+                    await client.dispatch(
+                        "claude",
+                        "t1",
+                        {"schema_version": "2.8"},
+                        permission_handler=lambda _req: "denied",
+                        timeout=5.0,
+                    )
+            finally:
+                await client.close()
+        finally:
+            srv.close()
+            await srv.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_permission_no_handler_default_denied():
+    """dispatch() without handler auto-answers 'denied' to permission.request."""
+    with tempfile.TemporaryDirectory() as tmp:
+        sock = os.path.join(tmp, "perm-noh.sock")
+
+        async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            disp = json.loads(line)
+
+            # Send permission.request.
+            req = json.dumps({
+                "type": "permission.request",
+                "ts": "2026-06-16T10:00:00.000Z",
+                "permission_id": "perm-3",
+                "req_id": disp["req_id"],
+                "agent_id": "claude",
+                "tool": "bash",
+                "args": {},
+            })
+            writer.write((req + "\n").encode())
+            await writer.drain()
+
+            # Read response — must be "denied" (default).
+            resp = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            pr = json.loads(resp)
+            assert pr["type"] == "permission.response"
+            assert pr["permission_id"] == "perm-3"
+            assert pr["decision"] == "denied"
+
+            # Send terminal.
+            term = json.dumps({
+                "type": "system.error",
+                "ts": "2026-06-16T10:00:00.000Z",
+                "req_id": disp["req_id"],
+                "error": "invalid_message",
+                "detail": "not implemented",
+            })
+            writer.write((term + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        srv = await asyncio.start_unix_server(_handler, path=sock)
+        try:
+            client = DaedalusClient(sock)
+            await client.connect()
+            try:
+                with pytest.raises(DaedalusClientError):
+                    await client.dispatch(
+                        "claude",
+                        "t1",
+                        {"schema_version": "2.8"},
+                        # No permission_handler → auto "denied"
+                        timeout=5.0,
+                    )
+            finally:
+                await client.close()
+        finally:
+            srv.close()
+            await srv.wait_closed()

@@ -76,16 +76,13 @@ async fn writer_loop(
     state: &SessionState,
 ) {
     while let Some(msg) = rx.recv().await {
-        match protocol::serialize_message(&msg) {
-            Ok(mut json) => {
-                json.push('\n');
-                if writer.write_all(json.as_bytes()).await.is_err() {
-                    state.shutdown.cancel();
-                    session::drain_pending(state);
-                    break;
-                }
+        if let Ok(mut json) = protocol::serialize_message(&msg) {
+            json.push('\n');
+            if writer.write_all(json.as_bytes()).await.is_err() {
+                state.shutdown.cancel();
+                session::drain_pending(state);
+                break;
             }
-            Err(_) => {}
         }
     }
 }

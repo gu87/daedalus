@@ -35,11 +35,11 @@ fn ping_json_to_rust_to_json_roundtrip() {
 
 #[test]
 fn unknown_message_type_is_rejected() {
-    let input = r#"{"type":"task.dispatch","ts":"2026-06-15T10:00:00.000Z","agent_id":"claude"}"#;
+    let input = r#"{"type":"not.a.real.type","ts":"2026-06-15T10:00:00.000Z","req_id":"r1"}"#;
 
     let err = protocol::parse_message(input).unwrap_err();
     assert_eq!(err.code, SystemErrorCode::UnknownMessageType);
-    assert!(err.detail.contains("task.dispatch"));
+    assert!(err.detail.contains("not.a.real.type"));
 }
 
 // ── ProtocolError::into_message() generates system.error ────────────

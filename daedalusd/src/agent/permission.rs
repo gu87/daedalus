@@ -141,8 +141,17 @@ impl PermissionBroker for IpcPermissionBroker {
         let shutdown = self.state.shutdown.clone();
         let result = select! {
             decision = rx => {
-                // oneshot completed (or sender dropped).
-                decision.unwrap_or(PermissionDecision::Denied)
+                match decision {
+                    Ok(d) => d,
+                    Err(_) => {
+                        // Sender dropped — drain_pending / connection lost.
+                        // Already removed from map by drain_pending.
+                        return Err(AgentError {
+                            reason: ErrorKind::Cancelled,
+                            detail: "permission interrupted: connection lost".into(),
+                        });
+                    }
+                }
             }
             _ = tokio::time::sleep(self.default_timeout) => {
                 // Timeout — remove pending, return Denied.

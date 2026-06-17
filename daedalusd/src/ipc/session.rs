@@ -26,13 +26,19 @@ pub struct SessionState {
     next_perm_id: AtomicU64,
 }
 
-impl SessionState {
-    pub fn new() -> Self {
+impl Default for SessionState {
+    fn default() -> Self {
         Self {
             pending_permissions: Mutex::new(HashMap::new()),
             shutdown: CancellationToken::new(),
             next_perm_id: AtomicU64::new(1),
         }
+    }
+}
+
+impl SessionState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Generate the next permission ID (`"perm-1"`, `"perm-2"`, …).

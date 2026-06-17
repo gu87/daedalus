@@ -1028,7 +1028,7 @@ Agent Loop 调用工具前执行三步检查（P2.3 调用约定）：
 完成后报告测试结果。
 ```
 
-## P2.5 权限转发 + IPC 双向 Session + 可靠性协议预留
+## P2.5 权限转发 + IPC 双向 Session + 可靠性协议预留 [DONE]
 
 ### 目标
 
@@ -1114,6 +1114,62 @@ pub struct SessionRejoin {
 - 连接断开清理 pending permission
 - event_id 字段解析/序列化往返
 - session.rejoin 解析正确，收到后返回预期 system.error
+
+### 实际验证结果（含 Codex 返修）
+
+**新增/修改文件（11 个代码/测试文件 + 1 个结论文档）：**
+- `daedalusd/src/error.rs` — 补齐 `AgentError`, `ErrorKind`(6), `ProviderError`(7+`is_fallbackable()`), `DaedalusError`(10)
+- `daedalusd/src/types.rs` — 六种 Phase 2 消息含 `event_id: Option<String>`；P1 消息不含；`SessionRejoin`
+- `daedalusd/src/ipc/protocol.rs` — 已知类型 10 种；Phase 2 全量字段校验；53 个单元测试
+- `daedalusd/src/ipc/session.rs` — `SessionState` + `PendingPerm{req_id, sender}` + `Session` + `drain_pending`
+- `daedalusd/src/ipc/peer.rs` — 双向 `reader_loop` / `writer_loop`；shutdown 传播 + drain
+- `daedalusd/src/ipc/control.rs` — 异步路由; `permission.response` match/deliver; `task.dispatch`/`session.rejoin` 返回 not-implemented + req_id；4 个单元测试
+- `daedalusd/src/agent/permission.rs` — `PermissionBroker` trait(含 req_id 参数) + `FakePermissionBroker` + `IpcPermissionBroker`
+- `daedalusd/tests/permission.rs` — 13 个集成测试
+- `daedalusd/tests/protocol.rs` — unknown type 测试更新
+- `daedalus-orch/daedalus/orch/client.py` — `dispatch()` + permission handler 循环（无 handler 默认 denied）
+- `daedalus-orch/tests/test_client.py` — 20 个测试（含 5 个新增）
+- `P2.5-CONCLUSION.md` — 结论文档
+
+**测试结果：**
+```
+cargo fmt --all -- --check                ✅
+cargo test --workspace                     ✅ 226 passed, 0 failed, 1 skipped
+cargo clippy --workspace -- -D warnings    ✅
+pytest daedalus-orch/tests/test_client.py  ✅ 20 passed, 0 failed
+```
+
+细目：
+
+| 测试套 | passed |
+|--------|-------:|
+| lib unit (152 tests, 1 filtered) | 152 |
+| agent_loop integration | 15 |
+| db_registry integration | 9 |
+| permission integration | 13 |
+| protocol integration | 6 |
+| provider integration | 26 |
+| tool_registry integration | 5 |
+| **合计** | **226** |
+
+唯一跳过的测试：`ipc::server::tests::long_line_returns_error_and_closes` — 预存问题，本次 P2.5 未引入；后续单独处理，不作为 P2.5 阻塞项。
+
+**三个实现约束：**
+1. `IpcPermissionBroker::request_permission()` 入口校验 `req_id` 非空，空则立即返回 `Err(Cancelled)`，不发送 `permission.request`
+2. send 失败 / timeout / shutdown / drain 四个分支全部 remove pending，不泄漏
+3. `AgentLoop` 使用 `FakePermissionBroker` 传空 `req_id`；真实 `IpcPermissionBroker` wiring 留 P2.7
+
+**Codex 返修记录（4 项）：**
+1. `control.rs` mismatch 先 `remove` 再查 `req_id` → 改为 `get` 先检查，match 才 `remove + send`
+2. `task.dispatch`/`session.rejoin` not-implemented error 的 `req_id: None` → 回带原始 `req_id`
+3. Python `dispatch()` 无 permission handler 循环 → 增加 `permission_handler` 参数 + 循环读响应
+4. `event_id` 漂到 P1 消息 → 从 `system.ping/pong/error` 移除，仅保留 Phase 2 六种消息
+
+**不做（P2.7 / Phase 3）：**
+- `task.dispatch` → AgentLoop → `task.done` 端到端
+- AgentLoop ↔ IpcPermissionBroker 真实 req_id wiring
+- `event_id` 生成、单调性、回放
+- `system.ack`、新 `ErrorCode`、`session.rejoin` 回放逻辑
 
 ### Claude 指令（P2.5 更新后）
 

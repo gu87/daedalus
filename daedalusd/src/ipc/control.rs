@@ -14,40 +14,46 @@ pub async fn route(state: &SessionState, text: &str, writer_tx: &mpsc::Sender<Me
                 Message::SystemPong(_) | Message::SystemError(_) => None,
                 Message::PermissionResponse(ref pr) => {
                     let mut map = state.pending_permissions.lock().unwrap();
-                    match map.remove(&pr.permission_id) {
-                        Some(pending) => {
-                            if pending.req_id != pr.req_id {
-                                let err = protocol::make_error(
-                                SystemErrorCode::InvalidMessage, Some(pr.req_id.clone()),
-                                format!("req_id mismatch for permission '{}': expected '{}', got '{}'", pr.permission_id, pending.req_id, pr.req_id),
-                            );
-                                drop(map);
-                                drop(pending.sender);
-                                Some(err)
-                            } else {
-                                drop(map);
-                                let _ = pending.sender.send(pr.decision.clone());
-                                None
-                            }
-                        }
+                    match map.get(&pr.permission_id) {
                         None => {
-                            drop(map);
-                            Some(protocol::make_error(
+                            let err = protocol::make_error(
                                 SystemErrorCode::InvalidMessage,
                                 Some(pr.req_id.clone()),
                                 format!("unknown permission id '{}'", pr.permission_id),
-                            ))
+                            );
+                            drop(map);
+                            Some(err)
+                        }
+                        Some(pending) if pending.req_id == pr.req_id => {
+                            // Match — remove and deliver.
+                            let pending = map.remove(&pr.permission_id).unwrap();
+                            drop(map);
+                            let _ = pending.sender.send(pr.decision.clone());
+                            None
+                        }
+                        Some(pending) => {
+                            // req_id mismatch — keep pending, return error.
+                            let err = protocol::make_error(
+                                SystemErrorCode::InvalidMessage,
+                                Some(pr.req_id.clone()),
+                                format!(
+                                    "req_id mismatch for permission '{}': expected '{}', got '{}'",
+                                    pr.permission_id, pending.req_id, pr.req_id
+                                ),
+                            );
+                            drop(map);
+                            Some(err)
                         }
                     }
                 }
-                Message::SessionRejoin(_) => Some(protocol::make_error(
+                Message::SessionRejoin(ref sr) => Some(protocol::make_error(
                     SystemErrorCode::InvalidMessage,
-                    None,
+                    Some(sr.req_id.clone()),
                     "session.rejoin replay not implemented in Phase 2".into(),
                 )),
-                Message::TaskDispatch(_) => Some(protocol::make_error(
+                Message::TaskDispatch(ref td) => Some(protocol::make_error(
                     SystemErrorCode::InvalidMessage,
-                    None,
+                    Some(td.req_id.clone()),
                     "task.dispatch not implemented in Phase 2".into(),
                 )),
                 Message::TaskStream(_)
@@ -60,5 +66,190 @@ pub async fn route(state: &SessionState, text: &str, writer_tx: &mpsc::Sender<Me
     };
     if let Some(resp) = response {
         let _ = writer_tx.send(resp).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::session::{PendingPerm, SessionState};
+    use crate::types::{PermissionDecision, PermissionResponse, SessionRejoin, TaskDispatch};
+    use std::sync::Arc;
+
+    fn make_state() -> SessionState {
+        SessionState::new()
+    }
+
+    fn make_writer() -> (mpsc::Sender<Message>, mpsc::Receiver<Message>) {
+        mpsc::channel::<Message>(64)
+    }
+
+    /// Helper: insert a pending permission into the session state.
+    fn insert_pending(state: &SessionState, perm_id: &str, req_id: &str) {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state.pending_permissions.lock().unwrap().insert(
+            perm_id.to_string(),
+            PendingPerm {
+                req_id: req_id.to_string(),
+                sender: tx,
+            },
+        );
+    }
+
+    // ── req_id mismatch preserves pending ────────────────────────────
+
+    #[tokio::test]
+    async fn permission_response_req_id_mismatch_keeps_pending() {
+        let state = make_state();
+        insert_pending(&state, "perm-1", "real-req");
+
+        let (tx, mut rx) = make_writer();
+        let json = serde_json::json!({
+            "type": "permission.response",
+            "ts": "2026-06-15T10:00:00.000Z",
+            "permission_id": "perm-1",
+            "req_id": "wrong-req",
+            "decision": "approved"
+        })
+        .to_string();
+
+        route(&state, &json, &tx).await;
+
+        // 1. Pending must still exist (NOT removed).
+        {
+            let map = state.pending_permissions.lock().unwrap();
+            assert!(map.contains_key("perm-1"), "pending must survive mismatch");
+        }
+
+        // 2. system.error must be written to the writer channel.
+        let resp = rx.try_recv().expect("must receive system.error");
+        match resp {
+            Message::SystemError(e) => {
+                assert_eq!(e.error, SystemErrorCode::InvalidMessage);
+                assert!(e.detail.contains("req_id mismatch"), "got: {}", e.detail);
+                assert_eq!(e.req_id.as_deref(), Some("wrong-req"));
+            }
+            _ => panic!("expected SystemError, got {:?}", resp),
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_response_match_after_mismatch_still_works() {
+        let state = make_state();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        state.pending_permissions.lock().unwrap().insert(
+            "perm-1".to_string(),
+            PendingPerm {
+                req_id: "real-req".to_string(),
+                sender: resp_tx,
+            },
+        );
+
+        let (tx, mut rx) = make_writer();
+
+        // First: mismatch.
+        let json_wrong = serde_json::json!({
+            "type": "permission.response",
+            "ts": "2026-06-15T10:00:00.000Z",
+            "permission_id": "perm-1",
+            "req_id": "wrong-req",
+            "decision": "approved"
+        })
+        .to_string();
+        route(&state, &json_wrong, &tx).await;
+        // Drain the error.
+        let _err = rx.try_recv().unwrap();
+
+        // Second: correct match.
+        let json_right = serde_json::json!({
+            "type": "permission.response",
+            "ts": "2026-06-15T10:00:00.000Z",
+            "permission_id": "perm-1",
+            "req_id": "real-req",
+            "decision": "approved"
+        })
+        .to_string();
+        route(&state, &json_right, &tx).await;
+
+        // The oneshot should receive Approved.
+        let decision = resp_rx.await.unwrap();
+        assert_eq!(decision, PermissionDecision::Approved);
+
+        // Pending map must be empty.
+        let map = state.pending_permissions.lock().unwrap();
+        assert!(map.is_empty());
+    }
+
+    // ── not-implemented errors carry req_id ──────────────────────────
+
+    #[tokio::test]
+    async fn task_dispatch_not_implemented_returns_req_id() {
+        let state = make_state();
+        let (tx, mut rx) = make_writer();
+        let json = serde_json::json!({
+            "type": "task.dispatch",
+            "ts": "2026-06-15T10:00:00.000Z",
+            "req_id": "my-dispatch-req",
+            "agent_id": "claude",
+            "task_id": "t1",
+            "task_card": {
+                "schema_version": "2.8",
+                "task_card_id": "t1",
+                "project": "p",
+                "created_at": "2026-01-01T00:00:00Z",
+                "status": "open",
+                "goal": "g",
+                "compiled_intent": {},
+                "context": {
+                    "user_preferences": {},
+                    "project_context": {"name": "p", "data": {}, "global_must_avoid": []},
+                    "relevant_feedback": {}
+                },
+                "execution_plan": {},
+                "acceptance_criteria": {},
+                "allowed_files": [],
+                "safety": {"allowed_paths": [], "denied_commands": []},
+                "output_contract": {},
+                "review_gate_criteria": {}
+            }
+        })
+        .to_string();
+
+        route(&state, &json, &tx).await;
+
+        let resp = rx.try_recv().expect("must receive system.error");
+        match resp {
+            Message::SystemError(e) => {
+                assert_eq!(e.error, SystemErrorCode::InvalidMessage);
+                assert!(e.detail.contains("task.dispatch"));
+                assert_eq!(e.req_id.as_deref(), Some("my-dispatch-req"));
+            }
+            _ => panic!("expected SystemError, got {:?}", resp),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_rejoin_not_implemented_returns_req_id() {
+        let state = make_state();
+        let (tx, mut rx) = make_writer();
+        let json = serde_json::json!({
+            "type": "session.rejoin",
+            "ts": "2026-06-15T10:00:00.000Z",
+            "req_id": "my-rejoin-req",
+            "task_id": "t1"
+        })
+        .to_string();
+
+        route(&state, &json, &tx).await;
+
+        let resp = rx.try_recv().expect("must receive system.error");
+        match resp {
+            Message::SystemError(e) => {
+                assert_eq!(e.error, SystemErrorCode::InvalidMessage);
+                assert!(e.detail.contains("session.rejoin"));
+                assert_eq!(e.req_id.as_deref(), Some("my-rejoin-req"));
+            }
+            _ => panic!("expected SystemError, got {:?}", resp),
+        }
     }
 }
