@@ -1407,7 +1407,7 @@ cargo clippy --workspace -- -D warnings  ✅ 通过
 - `daedalusd/src/ipc/peer.rs` — `spawn_session()` + `reader_loop()` 传递 `Arc<DaemonContext>` + `Arc<SessionState>`
 - `daedalusd/src/ipc/server.rs` — 新增 `run_with_context()` + `run_with_listener()`；`accept_loop()` 接收 `ctx`
 - `daedalusd/src/main.rs` — 构造 `DaemonContext` + `DefaultAgentLoopFactory`；调用 `run_with_context()`
-- `daedalusd/tests/full_dispatch.rs` — 3 个全链路集成测试（新增文件）
+- `daedalusd/tests/full_dispatch.rs` — 5 个全链路集成测试（新增文件）
 - `daedalusd/tests/agent_loop.rs` — 5 个 `LifecycleContext` 构造增加 `req_id` 字段
 - `daedalus-orch/daedalus/orch/client.py` — `dispatch()` 循环读到 `task.done`/`task.error`，累积 `task.stream`
 - `scripts/smoke-phase2.sh` — A 段真实 daemon ping + B 段 Rust full_dispatch（新增文件）
@@ -1426,7 +1426,7 @@ cargo clippy --workspace -- -D warnings  ✅ 通过
 | lib unit (170 tests, 1 filtered) | 169 |
 | agent_loop integration | 20 |
 | db_registry integration | 15 |
-| full_dispatch integration | 3 |
+| full_dispatch integration | 5 |
 | permission integration | 13 |
 | protocol integration | 6 |
 | provider integration | 26 |
