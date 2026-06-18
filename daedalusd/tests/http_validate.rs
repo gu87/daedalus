@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use httptest::matchers::request;
+use httptest::matchers::{json_decoded, request};
 use httptest::{responders, Expectation, Server};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -72,9 +72,16 @@ async fn validate_reachable() {
     }
 
     // Start a mock HTTP server that returns a valid chat completion.
+    // Verify Router mapped local model id → upstream model_id ("upstream-x"),
+    // and the probe request uses max_tokens=1, temperature=0.0.
     let mock_server = Server::run();
     mock_server.expect(
-        Expectation::matching(request::path("/v1/chat/completions")).respond_with(
+        Expectation::matching(request::body(json_decoded(|v: &serde_json::Value| {
+            v.get("model").and_then(|m| m.as_str()) == Some("upstream-x")
+                && v.get("max_tokens").and_then(|n| n.as_i64()) == Some(1)
+                && v.get("temperature").and_then(|t| t.as_f64()) == Some(0.0)
+        })))
+        .respond_with(
             responders::status_code(200).body(r#"{"choices":[{"message":{"content":"pong"}}]}"#),
         ),
     );
