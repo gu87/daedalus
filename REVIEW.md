@@ -1,7 +1,7 @@
 # UI Skeleton 合并完成报告：daedalus-desktop
 
 > 将 `daedalus_react_ui_skeleton.zip` 合并为 `daedalus-desktop/` Electron + React + TypeScript 桌面项目。
-> Commit: `6dc9cd4`
+> UI 代码 commit: `6dc9cd4`，报告 commit: `75d7df6`
 
 ---
 
