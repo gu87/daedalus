@@ -365,3 +365,299 @@ fn touch_heartbeat_updates_timestamp() {
     let row = registry::get_run(&conn, "r-hb-1").unwrap().unwrap();
     assert_eq!(row.heartbeat_at, Some(1700001100));
 }
+
+// ── P3.1b: list_recent_runs tests ────────────────────────────────────
+
+fn seed_run_with_outbox(
+    conn: &Connection,
+    run_id: &str,
+    agent_id: &str,
+    task_id: &str,
+    status: &AgentRunStatus,
+    completed_at: i64,
+    spawned_at: i64,
+    outbox_json: Option<&str>,
+    error_taxonomy: Option<&str>,
+) {
+    registry::insert_run(
+        conn,
+        &NewAgentRun {
+            run_id: run_id.to_string(),
+            agent_id: agent_id.to_string(),
+            task_id: task_id.to_string(),
+            parent_run_id: None,
+            spawn_depth: 0,
+            spawned_at,
+            timeout_seconds: Some(300),
+        },
+    )
+    .unwrap();
+    registry::transition_to_running(conn, run_id, spawned_at + 1).unwrap();
+    // Write terminal state via transition.
+    match status {
+        AgentRunStatus::Done => {
+            let ob = outbox_json.unwrap_or(r#"{"summary":"ok"}"#);
+            registry::transition_to_done(conn, run_id, completed_at, ob).unwrap();
+        }
+        AgentRunStatus::Error => {
+            let tax = error_taxonomy.unwrap_or("tool_failure");
+            registry::transition_to_error(conn, run_id, completed_at, tax).unwrap();
+        }
+        AgentRunStatus::Cancelled => {
+            registry::transition_to_cancelled(conn, run_id, completed_at).unwrap();
+        }
+        _ => {
+            registry::update_status(conn, run_id, status).unwrap();
+        }
+    }
+}
+
+#[test]
+fn list_recent_runs_only_terminal_statuses() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_run_with_outbox(
+        &conn,
+        "r1",
+        "ag",
+        "t1",
+        &AgentRunStatus::Done,
+        1000,
+        900,
+        Some(r#"{"summary":"done task"}"#),
+        None,
+    );
+    seed_run_with_outbox(
+        &conn,
+        "r2",
+        "ag",
+        "t2",
+        &AgentRunStatus::Error,
+        2000,
+        1900,
+        None,
+        Some("task_timeout"),
+    );
+    seed_run_with_outbox(
+        &conn,
+        "r3",
+        "ag",
+        "t3",
+        &AgentRunStatus::Cancelled,
+        3000,
+        2900,
+        None,
+        None,
+    );
+    // queued/running/orphaned should be filtered.
+    seed_run_with_outbox(
+        &conn,
+        "r4",
+        "ag",
+        "t4",
+        &AgentRunStatus::Queued,
+        0,
+        4000,
+        None,
+        None,
+    );
+    seed_run_with_outbox(
+        &conn,
+        "r5",
+        "ag",
+        "t5",
+        &AgentRunStatus::Running,
+        0,
+        5000,
+        None,
+        None,
+    );
+    seed_run_with_outbox(
+        &conn,
+        "r6",
+        "ag",
+        "t6",
+        &AgentRunStatus::Orphaned,
+        0,
+        6000,
+        None,
+        None,
+    );
+
+    let runs = registry::list_recent_runs(&conn, "ag", 10).unwrap();
+    assert_eq!(runs.len(), 3, "only done/error/cancelled");
+    let ids: Vec<&str> = runs.iter().map(|r| r.task_id.as_str()).collect();
+    assert!(ids.contains(&"t1"));
+    assert!(ids.contains(&"t2"));
+    assert!(ids.contains(&"t3"));
+    assert!(!ids.contains(&"t4"));
+    assert!(!ids.contains(&"t5"));
+    assert!(!ids.contains(&"t6"));
+}
+
+#[test]
+fn list_recent_runs_limit() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    for i in 0..5 {
+        seed_run_with_outbox(
+            &conn,
+            &format!("r{i}"),
+            "ag",
+            &format!("t{i}"),
+            &AgentRunStatus::Done,
+            1000 + i * 100,
+            900 + i * 100,
+            Some(r#"{"summary":"ok"}"#),
+            None,
+        );
+    }
+    assert_eq!(registry::list_recent_runs(&conn, "ag", 2).unwrap().len(), 2);
+    assert_eq!(registry::list_recent_runs(&conn, "ag", 0).unwrap().len(), 0);
+}
+
+#[test]
+fn list_recent_runs_sort_order() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    // Same completed_at, different spawned_at.
+    seed_run_with_outbox(
+        &conn,
+        "ra",
+        "ag",
+        "ta",
+        &AgentRunStatus::Done,
+        1000,
+        800,
+        Some(r#"{"summary":"a"}"#),
+        None,
+    );
+    seed_run_with_outbox(
+        &conn,
+        "rb",
+        "ag",
+        "tb",
+        &AgentRunStatus::Done,
+        1000,
+        900,
+        Some(r#"{"summary":"b"}"#),
+        None,
+    );
+    // Different completed_at.
+    seed_run_with_outbox(
+        &conn,
+        "rc",
+        "ag",
+        "tc",
+        &AgentRunStatus::Done,
+        2000,
+        700,
+        Some(r#"{"summary":"c"}"#),
+        None,
+    );
+
+    let runs = registry::list_recent_runs(&conn, "ag", 10).unwrap();
+    // completed_at DESC → tc(2000) first, then tb(900) before ta(800)
+    assert_eq!(runs[0].task_id, "tc");
+    assert_eq!(runs[1].task_id, "tb");
+    assert_eq!(runs[2].task_id, "ta");
+}
+
+#[test]
+fn list_recent_runs_empty() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    let runs = registry::list_recent_runs(&conn, "no-such-agent", 5).unwrap();
+    assert!(runs.is_empty());
+}
+
+#[test]
+fn list_recent_runs_summary_extraction() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_run_with_outbox(
+        &conn,
+        "r-sum",
+        "ag",
+        "t-sum",
+        &AgentRunStatus::Done,
+        1000,
+        900,
+        Some(r#"{"summary":"all tests pass","status":"waiting_for_verification"}"#),
+        None,
+    );
+    let runs = registry::list_recent_runs(&conn, "ag", 1).unwrap();
+    assert_eq!(runs[0].outbox_summary.as_deref(), Some("all tests pass"));
+}
+
+#[test]
+fn list_recent_runs_bad_outbox_json_is_none() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    // Write a row with bad JSON in outbox_json via direct SQL.
+    registry::insert_run(
+        &conn,
+        &NewAgentRun {
+            run_id: "r-bad".to_string(),
+            agent_id: "ag".to_string(),
+            task_id: "t-bad".to_string(),
+            parent_run_id: None,
+            spawn_depth: 0,
+            spawned_at: 900,
+            timeout_seconds: Some(300),
+        },
+    )
+    .unwrap();
+    registry::transition_to_running(&conn, "r-bad", 901).unwrap();
+    conn.execute(
+        "UPDATE agent_runs SET status='done', completed_at=1000, outbox_json='not-json' WHERE run_id='r-bad'",
+        [],
+    )
+    .unwrap();
+    let runs = registry::list_recent_runs(&conn, "ag", 5).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].outbox_summary, None);
+}
+
+#[test]
+fn list_recent_runs_summary_truncated_unicode() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    // 130-char chinese summary — should be truncated to 120 chars.
+    let long_cn: String = std::iter::repeat('中').take(130).collect();
+    let ob = format!(r#"{{"summary":"{}"}}"#, long_cn);
+    seed_run_with_outbox(
+        &conn,
+        "r-cn",
+        "ag",
+        "t-cn",
+        &AgentRunStatus::Done,
+        1000,
+        900,
+        Some(&ob),
+        None,
+    );
+    let runs = registry::list_recent_runs(&conn, "ag", 1).unwrap();
+    let s = runs[0].outbox_summary.as_ref().unwrap();
+    assert_eq!(s.chars().count(), 120, "should be char-truncated to 120");
+    assert!(s.starts_with('中'));
+}
+
+#[test]
+fn list_recent_runs_missing_summary_field_is_none() {
+    let (_dir, mut conn) = open_temp();
+    migrations::run_all(&mut conn).unwrap();
+    seed_run_with_outbox(
+        &conn,
+        "r-nosum",
+        "ag",
+        "t-nosum",
+        &AgentRunStatus::Done,
+        1000,
+        900,
+        Some(r#"{"status":"waiting_for_verification"}"#),
+        None,
+    );
+    let runs = registry::list_recent_runs(&conn, "ag", 1).unwrap();
+    assert_eq!(runs[0].outbox_summary, None);
+}

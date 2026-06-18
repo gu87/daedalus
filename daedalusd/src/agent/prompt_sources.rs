@@ -510,6 +510,51 @@ impl SourceProvider for AuthorityMapProvider {
     }
 }
 
+// ── AgentHistoryProvider ──────────────────────────────────────────────
+
+pub struct AgentHistoryProvider {
+    db_path: std::path::PathBuf,
+    limit: usize,
+}
+
+impl AgentHistoryProvider {
+    pub fn new(db_path: &std::path::Path, limit: usize) -> Self {
+        Self {
+            db_path: db_path.to_path_buf(),
+            limit,
+        }
+    }
+}
+
+impl SourceProvider for AgentHistoryProvider {
+    fn label(&self) -> &str {
+        "history"
+    }
+
+    fn provide(&self, agent_id: &str, _task: &TaskCard) -> Result<Option<String>, DaedalusError> {
+        use crate::db::pool;
+        use crate::db::registry;
+
+        let conn =
+            pool::open(&self.db_path).map_err(|e| DaedalusError::Database(format!("open: {e}")))?;
+        let runs = registry::list_recent_runs(&conn, agent_id, self.limit)
+            .map_err(|e| DaedalusError::Database(format!("list_recent_runs: {e}")))?;
+        drop(conn);
+
+        if runs.is_empty() {
+            return Ok(None);
+        }
+
+        let mut lines = vec!["最近任务历史:".to_string()];
+        for r in &runs {
+            let status_str = r.status.as_str();
+            let summary = r.outbox_summary.as_deref().unwrap_or("—");
+            lines.push(format!("- {} ({status_str}): {summary}", r.task_id));
+        }
+        Ok(Some(lines.join("\n")))
+    }
+}
+
 // ── SkillsProvider ────────────────────────────────────────────────────
 
 /// Hard-coded English stopword set for token-overlap matching.

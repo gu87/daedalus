@@ -125,6 +125,8 @@ pub struct DaedalusConfig {
     pub skills_dir: String,
     /// Path to models.yaml.
     pub models_yaml_path: String,
+    /// P3.1b: path to daedalusd.sqlite.  None disables AgentHistoryProvider.
+    pub db_path: Option<std::path::PathBuf>,
 }
 
 impl DaedalusConfig {
@@ -139,6 +141,7 @@ impl DaedalusConfig {
             skills_dir: std::env::var("DAEDALUS_SKILLS_DIR")
                 .unwrap_or_else(|_| format!("{home}/.hermes/skills")),
             models_yaml_path: default_models_yaml_path(),
+            db_path: None,
         }
     }
 }

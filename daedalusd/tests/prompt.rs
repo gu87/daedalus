@@ -393,6 +393,7 @@ fn setup_full_chain(dir: &tempfile::TempDir) -> (PromptBuilder, String) {
         managed_agents_path: agents_path,
         skills_dir: skills_dir.to_string_lossy().to_string(),
         models_yaml_path: format!("{base}/models.yaml"),
+        db_path: None,
     };
 
     // Build PromptBuilder with a custom provider chain that uses MemoryPaths::with_home
@@ -468,4 +469,208 @@ fn memory_paths_with_home_consistent() {
     let mp = MemoryPaths::with_home("/tmp/daedalus-test");
     assert_eq!(mp.memory_md, "/tmp/daedalus-test/.daedalus/MEMORY.md");
     assert_eq!(mp.user_md, "/tmp/daedalus-test/.daedalus/USER.md");
+}
+
+// ── P3.1b: AgentHistoryProvider ───────────────────────────────────────
+
+use daedalusd::agent::prompt_sources::AgentHistoryProvider;
+use daedalusd::db::{migrations, pool, registry};
+
+fn seed_history_db(db_path: &std::path::Path, agent_id: &str) {
+    let mut conn = pool::open(db_path).unwrap();
+    migrations::run_all(&mut conn).unwrap();
+    // Insert a done run with outbox summary.
+    registry::insert_run(
+        &conn,
+        &registry::NewAgentRun {
+            run_id: "rh-1".into(),
+            agent_id: agent_id.into(),
+            task_id: "th-done".into(),
+            parent_run_id: None,
+            spawn_depth: 0,
+            spawned_at: 900,
+            timeout_seconds: Some(300),
+        },
+    )
+    .unwrap();
+    registry::transition_to_running(&conn, "rh-1", 901).unwrap();
+    registry::transition_to_done(&conn, "rh-1", 1000, r#"{"summary":"fixed login bug"}"#).unwrap();
+
+    // Insert an error run.
+    registry::insert_run(
+        &conn,
+        &registry::NewAgentRun {
+            run_id: "rh-2".into(),
+            agent_id: agent_id.into(),
+            task_id: "th-err".into(),
+            parent_run_id: None,
+            spawn_depth: 0,
+            spawned_at: 1900,
+            timeout_seconds: Some(300),
+        },
+    )
+    .unwrap();
+    registry::transition_to_running(&conn, "rh-2", 1901).unwrap();
+    registry::transition_to_error(&conn, "rh-2", 2000, "task_timeout").unwrap();
+}
+
+#[test]
+fn history_provider_with_data() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    seed_history_db(&db_path, "test-agent");
+
+    let p = AgentHistoryProvider::new(&db_path, 5);
+    let result = p.provide("test-agent", &dummy_task()).unwrap().unwrap();
+    assert!(result.contains("最近任务历史"));
+    assert!(result.contains("th-done"));
+    assert!(result.contains("done"));
+    assert!(result.contains("fixed login bug"));
+    assert!(result.contains("th-err"));
+    assert!(result.contains("error"));
+}
+
+#[test]
+fn history_provider_no_data_is_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("empty.sqlite");
+    {
+        let mut conn = pool::open(&db_path).unwrap();
+        migrations::run_all(&mut conn).unwrap();
+    }
+    let p = AgentHistoryProvider::new(&db_path, 5);
+    let result = p.provide("no-agent", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn history_provider_none_summary_shows_dash() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let mut conn = pool::open(&db_path).unwrap();
+    migrations::run_all(&mut conn).unwrap();
+    // Insert a done run without outbox_json.
+    registry::insert_run(
+        &conn,
+        &registry::NewAgentRun {
+            run_id: "rh-nosum".into(),
+            agent_id: "ag".into(),
+            task_id: "th-nosum".into(),
+            parent_run_id: None,
+            spawn_depth: 0,
+            spawned_at: 900,
+            timeout_seconds: Some(300),
+        },
+    )
+    .unwrap();
+    registry::transition_to_running(&conn, "rh-nosum", 901).unwrap();
+    registry::transition_to_done(&conn, "rh-nosum", 1000, r#"{"status":"ok"}"#).unwrap();
+
+    let p = AgentHistoryProvider::new(&db_path, 5);
+    let result = p.provide("ag", &dummy_task()).unwrap().unwrap();
+    // Summary field missing → outbox_summary=None → display "—".
+    assert!(result.contains("—"), "should show em-dash for None summary");
+}
+
+#[test]
+fn full_chain_db_path_none_no_history() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (pb, _home) = setup_full_chain(&dir);
+    let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
+    assert!(!prompt.contains("[history]"));
+}
+
+// ── P3.1b: PromptBuilder::new() production wiring tests ──────────────
+
+/// Test that PromptBuilder::new(config) with db_path=Some automatically
+/// injects AgentHistoryProvider via the production code path.
+#[test]
+fn prompt_builder_new_db_path_some_injects_history() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let base = dir.path().to_string_lossy().to_string();
+
+    // Create required config files.
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let skills_dir = dir.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+
+    let soul_path = dir.path().join("SOUL.md");
+    std::fs::write(&soul_path, "You are Daedalus.").unwrap();
+    let agents_path = config_dir.join("managed-agents.yaml");
+    std::fs::write(
+        &agents_path,
+        "agents:\n  test-agent:\n    role_summary: T\n    tools: []\n    permission: auto\n    model_strategy:\n      primary:\n        model: x\n",
+    )
+    .unwrap();
+
+    // Create DB with history.
+    let db_path = dir.path().join("test.sqlite");
+    seed_history_db(&db_path, "test-agent");
+
+    // Production path: PromptBuilder::new reads config.db_path.
+    let cfg = DaedalusConfig {
+        soul_path: soul_path.to_string_lossy().to_string(),
+        managed_agents_path: agents_path.to_string_lossy().to_string(),
+        skills_dir: skills_dir.to_string_lossy().to_string(),
+        models_yaml_path: format!("{base}/models.yaml"),
+        db_path: Some(db_path),
+    };
+    let pb = PromptBuilder::new(cfg);
+    let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
+    assert!(prompt.contains("[history]"));
+    assert!(prompt.contains("th-done"));
+    assert!(prompt.contains("fixed login bug"));
+}
+
+/// Production path: PromptBuilder::new(cfg) with db_path=Some verifies
+/// history injection AND correct provider order [agent] < [history] < [skills].
+#[test]
+fn prompt_builder_new_history_between_agent_and_skills() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let base = dir.path().to_string_lossy().to_string();
+
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let skills_dir = dir.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+
+    let soul_path = dir.path().join("SOUL.md");
+    std::fs::write(&soul_path, "You are Daedalus.").unwrap();
+    let agents_path = config_dir.join("managed-agents.yaml");
+    std::fs::write(
+        &agents_path,
+        "agents:\n  test-agent:\n    role_summary: T\n    tools: []\n    permission: auto\n    model_strategy:\n      primary:\n        model: x\n",
+    )
+    .unwrap();
+
+    let db_path = dir.path().join("test.sqlite");
+    seed_history_db(&db_path, "test-agent");
+
+    // Write a matching skill so SkillsProvider produces [skills].
+    std::fs::write(
+        skills_dir.join("debug.md"),
+        "---\ndescription: debug authentication\n---\n# Debug\n",
+    )
+    .unwrap();
+
+    let cfg = DaedalusConfig {
+        soul_path: soul_path.to_string_lossy().to_string(),
+        managed_agents_path: agents_path.to_string_lossy().to_string(),
+        skills_dir: skills_dir.to_string_lossy().to_string(),
+        models_yaml_path: format!("{base}/models.yaml"),
+        db_path: Some(db_path),
+    };
+    let pb = PromptBuilder::new(cfg);
+    let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
+    assert!(
+        prompt.contains("[history]"),
+        "prompt should contain [history], got:\n{prompt}"
+    );
+
+    let agent = prompt.find("[agent]").expect("[agent] not found");
+    let history = prompt.find("[history]").expect("[history] not found");
+    let skills = prompt.find("[skills]").expect("[skills] not found");
+    assert!(agent < history, "[agent] must come before [history]");
+    assert!(history < skills, "[history] must come before [skills]");
 }

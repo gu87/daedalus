@@ -37,6 +37,9 @@ pub enum DaedalusError {
 
     #[error("missing API key env var: {env_var}")]
     MissingApiKey { env_var: String },
+
+    #[error("database error: {0}")]
+    Database(String),
 }
 
 // ── agent error ───────────────────────────────────────────────────────

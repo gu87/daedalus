@@ -34,7 +34,8 @@ async fn main() {
     let db_path = state_dir.join("daedalusd.sqlite");
 
     // ── daemon context (P2.7) ──────────────────────────────────────
-    let config = daedalusd::config::DaedalusConfig::load();
+    let mut config = daedalusd::config::DaedalusConfig::load();
+    config.db_path = Some(db_path.clone());
     let ctx = Arc::new(DaemonContext {
         config: config.clone(),
         db_path: db_path.clone(),

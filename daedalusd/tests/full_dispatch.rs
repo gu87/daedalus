@@ -184,6 +184,7 @@ fn setup_config(dir: &tempfile::TempDir) -> DaedalusConfig {
         managed_agents_path: format!("{base}/config/managed-agents.yaml"),
         skills_dir: format!("{base}/skills"),
         models_yaml_path: format!("{base}/models.yaml"),
+        db_path: None,
     }
 }
 

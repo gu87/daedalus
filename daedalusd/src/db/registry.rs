@@ -185,6 +185,68 @@ pub fn transition_to_orphaned(conn: &Connection, run_id: &str) -> Result<usize> 
     Ok(n)
 }
 
+// ── P3.1b: list recent runs ─────────────────────────────────────────
+
+/// Lightweight summary for agent_runs history injection.
+#[derive(Debug, Clone)]
+pub struct AgentRunSummary {
+    pub task_id: String,
+    pub status: AgentRunStatus,
+    pub spawned_at: i64,
+    pub completed_at: Option<i64>,
+    pub error_taxonomy: Option<String>,
+    /// Extracted from outbox_json → summary, truncated to 120 chars.
+    pub outbox_summary: Option<String>,
+}
+
+/// Return the N most recent completed runs for an agent.
+///
+/// Only `done` / `error` / `cancelled`.  Ordered by `completed_at DESC,
+/// spawned_at DESC, task_id ASC` for stable pagination.
+/// `limit == 0` returns an empty `Vec` without querying.
+pub fn list_recent_runs(
+    conn: &Connection,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<AgentRunSummary>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT task_id, status, spawned_at, completed_at, error_taxonomy, outbox_json \
+         FROM agent_runs \
+         WHERE agent_id = ?1 \
+           AND status IN ('done','error','cancelled') \
+         ORDER BY completed_at DESC, spawned_at DESC, task_id ASC \
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![agent_id, limit as i64], |row| {
+        let status_str: String = row.get(1)?;
+        let status = match status_str.as_str() {
+            "done" => AgentRunStatus::Done,
+            "error" => AgentRunStatus::Error,
+            "cancelled" => AgentRunStatus::Cancelled,
+            _ => AgentRunStatus::Error,
+        };
+        let outbox_json: Option<String> = row.get(5)?;
+        let outbox_summary = outbox_json.and_then(|json_str| {
+            serde_json::from_str::<serde_json::Value>(&json_str)
+                .ok()
+                .and_then(|v| v.get("summary")?.as_str().map(|s| s.to_string()))
+                .map(|s| s.chars().take(120).collect::<String>())
+        });
+        Ok(AgentRunSummary {
+            task_id: row.get(0)?,
+            status,
+            spawned_at: row.get(2)?,
+            completed_at: row.get(3)?,
+            error_taxonomy: row.get(4)?,
+            outbox_summary,
+        })
+    })?;
+    rows.collect()
+}
+
 // ── internal ─────────────────────────────────────────────────────────
 
 fn row_to_agent_run(row: &rusqlite::Row<'_>) -> Result<AgentRun> {

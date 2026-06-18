@@ -34,12 +34,31 @@ impl PromptBuilder {
     pub fn new(config: crate::config::DaedalusConfig) -> Self {
         let mp = prompt_sources::MemoryPaths::load();
 
-        let providers = Self::default_providers(
-            &config.soul_path,
-            &config.managed_agents_path,
+        let mut providers: Vec<Box<dyn prompt_sources::SourceProvider>> = vec![
+            Box::new(prompt_sources::SoulProvider::new(&config.soul_path)),
+            Box::new(prompt_sources::MemoryProvider::new(&mp.memory_md)),
+            Box::new(prompt_sources::UserProvider::new(&mp.user_md)),
+            Box::new(prompt_sources::PreferencesProvider::new(&mp.preferences)),
+            Box::new(prompt_sources::AgentConfigProvider::new(
+                &config.managed_agents_path,
+            )),
+            Box::new(prompt_sources::FeedbackProvider::new(&mp.feedback)),
+            Box::new(prompt_sources::ProjectContextProvider::new(
+                &mp.project_context,
+            )),
+            Box::new(prompt_sources::AuthorityMapProvider::new(&mp.authority_map)),
+        ];
+
+        // P3.1b: AgentHistoryProvider between [agent] and [skills].
+        if let Some(ref db_path) = config.db_path {
+            providers.push(Box::new(prompt_sources::AgentHistoryProvider::new(
+                db_path, 5,
+            )));
+        }
+
+        providers.push(Box::new(prompt_sources::SkillsProvider::new(
             &config.skills_dir,
-            &mp,
-        );
+        )));
 
         Self {
             providers,
@@ -57,29 +76,6 @@ impl PromptBuilder {
             providers,
             managed_agents_path,
         }
-    }
-
-    fn default_providers(
-        soul_path: &str,
-        managed_agents_path: &str,
-        skills_dir: &str,
-        mp: &prompt_sources::MemoryPaths,
-    ) -> Vec<Box<dyn prompt_sources::SourceProvider>> {
-        vec![
-            Box::new(prompt_sources::SoulProvider::new(soul_path)),
-            Box::new(prompt_sources::MemoryProvider::new(&mp.memory_md)),
-            Box::new(prompt_sources::UserProvider::new(&mp.user_md)),
-            Box::new(prompt_sources::PreferencesProvider::new(&mp.preferences)),
-            Box::new(prompt_sources::AgentConfigProvider::new(
-                managed_agents_path,
-            )),
-            Box::new(prompt_sources::FeedbackProvider::new(&mp.feedback)),
-            Box::new(prompt_sources::ProjectContextProvider::new(
-                &mp.project_context,
-            )),
-            Box::new(prompt_sources::AuthorityMapProvider::new(&mp.authority_map)),
-            Box::new(prompt_sources::SkillsProvider::new(skills_dir)),
-        ]
     }
 
     // ── public helpers ──────────────────────────────────────────────
