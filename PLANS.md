@@ -1566,7 +1566,7 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
               │
               └─→ P4.4  配置诊断 + 模型摘要 API [DONE] (168eb23)
                     │
-                    └─→ P4.5  模型连通性探测 API
+                    └─→ P4.5  模型连通性探测 API [DONE] (af9074b, fixup c03947a)
                           │
                           └─→ P4.6  Phase 4 验收收口
 ```
@@ -1664,3 +1664,25 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 **测试**：410 passed（+1 config_reload +5 http_config）
 
 **不做**：Router 热替换（Arc<RwLock>）、notify watcher、DaemonContext 重构
+
+## P4.5 模型连通性探测 API [DONE]
+
+> commits: af9074b, fixup: c03947a
+
+**目标**：新增 `POST /api/models/validate`，通过 Router 生产路径验证单模型连通性。
+
+**核心能力**：
+- `POST /api/models/validate { "model_id": "..." }` — model_id 是本地 `models[].id`
+- 走 `Router::from_models_config()` + `chat_with_fallback()` 生产路径
+- handler 层 `tokio::time::timeout(10s, ...)`
+- ProviderError 用 `Display` 文本返回，不泄露 body
+- 不缓存、不持久化
+
+**测试**：415 passed（+5 http_validate 集成测试）
+
+**返修点**（c03947a）：
+- `validate_reachable` 使用 `json_decoded` 闭包断言请求 body：
+  `model == "upstream-x"`、`max_tokens == 1`、`temperature == 0.0`
+  证明 Router 正确将本地 id 映射为上游 model_id
+
+**不做**：批量验证、定时探测、结果持久化、Router/AgentLoop/daemon 修改
