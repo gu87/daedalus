@@ -211,11 +211,13 @@ impl DaemonContext {
                     }
                     Err(agent_error) => {
                         let ec = agent_error.error_code();
+                        let semantic_tags = crate::gate::classify_semantic_tags(&agent_error);
                         let ctx = GateContext {
                             error_code: ec,
                             agent_id: agent_id.clone(),
                             task_id: task_id.clone(),
                             retry_count,
+                            semantic_tags,
                         };
                         match gate_router.route(&ctx) {
                             GateAction::HardStop => {

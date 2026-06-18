@@ -1316,3 +1316,436 @@ async fn streaming_midflight_provider_error_preserved() {
         .unwrap();
     assert_eq!(taxonomy.as_deref(), Some("auth_failure"));
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// P3.6: semantic tag Gate routing tests
+// ──────────────────────────────────────────────────────────────────────
+
+/// P3.6 Test 14: ToolFailure + non-Transient tag → HardStop
+/// even when a transient auto_revision rule exists.
+#[tokio::test]
+async fn permission_denied_tag_hard_stop() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    let provider = Arc::new(RecordingProvider::new(vec![vec![Ok(
+        StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        },
+    )]]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: tool_failure
+    require_tags:
+      - transient
+    action: auto_revision
+    max_retries: 2
+    reason: "retry transient tool failures"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            // BoomTool returns "boom tool always fails" — no keyword match
+            // → tags=[Permanent].  The transient rule does NOT match.
+            // Falls through to default HardStop.
+            assert_eq!(te.error_taxonomy, "tool_failure");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+}
+
+/// P3.6 Test 15: ToolFailure + Transient tag → auto_revision retry succeeds.
+#[tokio::test]
+async fn transient_tool_failure_auto_revision() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // Custom tool that returns "file not found" → tags [Transient].
+    struct NotFoundTool;
+    #[async_trait]
+    impl daedalusd::tools::Tool for NotFoundTool {
+        fn definition(&self) -> daedalusd::types::ToolDef {
+            daedalusd::types::ToolDef {
+                name: "read-file".into(),
+                description: "Returns not found".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+            }
+        }
+        fn risk_level(&self) -> daedalusd::types::RiskLevel {
+            daedalusd::types::RiskLevel::R1
+        }
+        fn allowed_agents(&self) -> Vec<String> {
+            vec!["*".into()]
+        }
+        fn needs_permission(&self, _args: &serde_json::Value) -> bool {
+            false
+        }
+        fn validate(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &daedalusd::tools::ToolContext,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &daedalusd::tools::ToolContext,
+        ) -> Result<daedalusd::types::ToolResult, daedalusd::tools::ToolError> {
+            Err(daedalusd::tools::ToolError::InvalidInput(
+                "file not found: /tmp/missing.json".into(),
+            ))
+        }
+    }
+
+    let provider = Arc::new(RecordingProvider::new(vec![
+        vec![Ok(StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "read-file".into(),
+            input: json!({}),
+        })],
+        vec![Ok(StreamChunk::Text {
+            content: "all good".into(),
+        })],
+    ]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(NotFoundTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: tool_failure
+    require_tags:
+      - transient
+    action: auto_revision
+    max_retries: 2
+    reason: "retry transient tool failures"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskDone(_) => {} // retry succeeded!
+        other => panic!("expected TaskDone, got {other:?}"),
+    }
+}
+
+/// P3.6 Test 16: AuthFailure → ConfigurationError tag blocks auto_revision
+/// (require_tags:[transient] does NOT match ConfigurationError).
+#[tokio::test]
+async fn configuration_error_blocks_auto_revision() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    let provider = Arc::new(RecordingProvider::new(vec![]).with_error(
+        0,
+        daedalusd::error::ProviderError::Auth {
+            status: 401,
+            body: "bad key".into(),
+        },
+    ));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: auth_failure
+    require_tags:
+      - transient
+    action: auto_revision
+    max_retries: 2
+    reason: "this should NOT match configuration_error"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            // Auth → tags=[Permanent, ConfigurationError, NeedsHuman].
+            // require_tags:[transient] → not present → skip → HardStop.
+            assert_eq!(te.error_taxonomy, "auth_failure");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+}
+
+/// P3.6 Test 17: RateLimited → [Transient, ResourceExhausted]
+/// → YAML require_tags:[transient, resource_exhausted] → match → retry.
+#[tokio::test]
+async fn rate_limited_tags_auto_revision() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    let provider = Arc::new(
+        RecordingProvider::new(vec![vec![Ok(StreamChunk::Text {
+            content: "ok".into(),
+        })]])
+        .with_error(
+            0,
+            daedalusd::error::ProviderError::RateLimited {
+                status: 429,
+                body: "too many".into(),
+            },
+        ),
+    );
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: rate_limited
+    require_tags:
+      - transient
+      - resource_exhausted
+    action: auto_revision
+    max_retries: 2
+    reason: "retry rate limited with both tags"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskDone(_) => {} // retry succeeded!
+        other => panic!("expected TaskDone, got {other:?}"),
+    }
+
+    let conn = pool::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agent_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2, "should have 2 runs (error + done)");
+}
+
+/// P3.6 Test 18: empty require_tags [] in YAML → parse error.
+#[tokio::test]
+async fn yaml_empty_require_tags_rejected() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let _db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: tool_failure
+    require_tags: []
+    action: auto_revision
+    reason: "empty require_tags should fail"
+"#,
+    )
+    .unwrap();
+
+    let result = CriteriaRegistry::with_overrides(&yaml_path);
+    match result {
+        Err(daedalusd::error::DaedalusError::Yaml(msg)) => {
+            assert!(
+                msg.to_lowercase().contains("require_tags"),
+                "expected require_tags error, got: {msg}"
+            );
+        }
+        other => panic!("expected Yaml error, got {other:?}"),
+    }
+}
+
+/// P3.6 Test 19: defaults unchanged — no YAML, all HardStop.
+#[tokio::test]
+async fn default_rules_unchanged_by_tags() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    let provider = Arc::new(RecordingProvider::new(vec![vec![Ok(
+        StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        },
+    )]]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let registry = CriteriaRegistry::defaults();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            assert_eq!(te.error_taxonomy, "tool_failure");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+}
