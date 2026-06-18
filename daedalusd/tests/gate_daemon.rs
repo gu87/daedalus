@@ -1894,7 +1894,7 @@ async fn switch_agent_then_auto_revision() {
         tools,
         config: config.clone(),
         alt_agent_id: Some("test-agent-2".into()),
-        alt_provider: Some(provider_b),
+        alt_provider: Some(Arc::clone(&provider_b)),
         reject_agent_id: None,
     });
 
@@ -1906,11 +1906,12 @@ rules:
   - error_code: tool_failure
     action: switch_agent
     target_agent: test-agent-2
-    reason: "switch to agent-2"
+    max_retries: 1
+    reason: "switch to agent-2 once"
   - error_code: tool_failure
     action: auto_revision
-    max_retries: 1
-    reason: "one retry on agent-2"
+    max_retries: 2
+    reason: "retry on same agent"
 "#,
     )
     .unwrap();
@@ -1970,8 +1971,43 @@ rules:
     assert_eq!(runs[1].1, "error");
     assert_eq!(runs[2].0, "test-agent-2");
     assert_eq!(runs[2].1, "done");
-}
 
+    // P3.7 Codex 返修：证明 B 的第二次尝试是 AutoRevision 而非再次 SwitchAgent。
+    let recorded = provider_b.take_recorded();
+    assert!(
+        recorded.len() >= 2,
+        "agent-B should have at least 2 LLM calls, got {}",
+        recorded.len()
+    );
+
+    // B's first call: from SwitchAgent, feedback mentions old agent.
+    let first_call = &recorded[0];
+    let first_has_switch_feedback = first_call
+        .iter()
+        .any(|m| m.content.contains("Previous agent 'test-agent' failed"));
+    assert!(
+        first_has_switch_feedback,
+        "B's first call should mention old agent"
+    );
+
+    // B's second call: from AutoRevision, feedback must NOT mention old agent,
+    // but SHOULD contain AutoRevision prefix.
+    let second_call = &recorded[1];
+    let second_has_switch_feedback = second_call
+        .iter()
+        .any(|m| m.content.contains("Previous agent 'test-agent-2' failed"));
+    assert!(
+        !second_has_switch_feedback,
+        "B's second call should NOT mention old agent (would mean another SwitchAgent)"
+    );
+    let second_has_auto_feedback = second_call
+        .iter()
+        .any(|m| m.content.contains("Previous attempt failed:"));
+    assert!(
+        second_has_auto_feedback,
+        "B's second call should contain AutoRevision feedback"
+    );
+}
 /// P3.7 Test 21: switch_agent build fails → TaskError with target agent_id.
 #[tokio::test]
 async fn switch_agent_build_fails() {

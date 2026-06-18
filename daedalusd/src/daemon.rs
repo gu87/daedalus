@@ -340,9 +340,10 @@ impl DaemonContext {
                                 }
 
                                 // Inject feedback mentioning which agent failed.
+                                // set_retry_feedback already prepends
+                                // "Previous attempt failed:" and appends analysis advice.
                                 new_al.set_retry_feedback(&format!(
-                                    "Previous agent '{}' failed: {}\n\
-                                     Please analyse the failure and try a different approach.",
+                                    "Previous agent '{}' failed: {}",
                                     old_agent, agent_error.detail,
                                 ));
 
