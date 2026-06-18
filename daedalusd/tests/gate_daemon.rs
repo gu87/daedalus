@@ -193,6 +193,11 @@ struct GateTestFactory {
     provider: Arc<RecordingProvider>,
     tools: Vec<Arc<dyn daedalusd::tools::Tool>>,
     config: DaedalusConfig,
+    /// P3.7: when agent_id matches, use alt_provider instead of provider.
+    alt_agent_id: Option<String>,
+    alt_provider: Option<Arc<RecordingProvider>>,
+    /// P3.7: when agent_id matches, build returns Err (for testing build failure).
+    reject_agent_id: Option<String>,
 }
 
 impl AgentLoopFactory for GateTestFactory {
@@ -202,6 +207,17 @@ impl AgentLoopFactory for GateTestFactory {
         perm_broker: Arc<dyn PermissionBroker>,
         cancel: CancellationToken,
     ) -> Result<AgentLoop, DaedalusError> {
+        // P3.7: reject specific agent for testing build failures.
+        if self
+            .reject_agent_id
+            .as_ref()
+            .is_some_and(|id| id == &agent_id)
+        {
+            return Err(DaedalusError::Protocol(format!(
+                "rejected agent {agent_id} for testing"
+            )));
+        }
+
         let mut r = ToolRegistry::new();
         for t in &self.tools {
             r.register(Arc::clone(t))
@@ -209,11 +225,17 @@ impl AgentLoopFactory for GateTestFactory {
         }
         let tool_registry = Arc::new(r);
 
+        // P3.7: use alt_provider for the designated alt agent.
+        let router_provider: Arc<dyn LLMProvider> =
+            if self.alt_agent_id.as_ref().is_some_and(|id| id == &agent_id) {
+                Arc::clone(self.alt_provider.as_ref().expect("alt_provider set"))
+                    as Arc<dyn LLMProvider>
+            } else {
+                Arc::clone(&self.provider) as Arc<dyn LLMProvider>
+            };
+
         let mut router = Router::new();
-        router.register(
-            "fake-model",
-            Arc::clone(&self.provider) as Arc<dyn LLMProvider>,
-        );
+        router.register("fake-model", router_provider);
         let router = Arc::new(router);
 
         let strategy = ModelStrategy {
@@ -249,7 +271,7 @@ fn setup_config(dir: &tempfile::TempDir) -> DaedalusConfig {
     std::fs::write(dir.path().join("SOUL.md"), "You are Daedalus.\n").unwrap();
     std::fs::write(
         config_dir.join("managed-agents.yaml"),
-        "agents:\n  test-agent:\n    role_summary: \"Test\"\n    tools: [boom,task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: fake-model\n      fallback_chain: []\n",
+        "agents:\n  test-agent:\n    role_summary: \"Test\"\n    tools: [boom,task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: fake-model\n      fallback_chain: []\n  test-agent-2:\n    role_summary: \"Test Agent 2\"\n    tools: [boom,task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: fake-model\n      fallback_chain: []\n",
     )
     .unwrap();
     DaedalusConfig {
@@ -340,6 +362,9 @@ async fn hard_stop_default_tool_failure() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let registry = CriteriaRegistry::defaults();
@@ -426,6 +451,9 @@ async fn auto_revision_single_retry_succeeds() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -521,6 +549,9 @@ async fn auto_revision_max_retries_exceeded() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -606,6 +637,9 @@ async fn global_cap_blocks_auto_revision() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -690,6 +724,9 @@ async fn retry_feedback_injected_after_system_prompt() {
         provider: Arc::clone(&provider),
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -748,20 +785,24 @@ rules:
     assert!(!second_call[0].content.contains("Previous attempt failed:"));
 }
 
-/// Test 6 (P3.4): switch_agent degrades to hard_stop.
+/// P3.7 Test 6 (replaces P3.4 degrade): SwitchAgent from test-agent to test-agent-2 succeeds.
 #[tokio::test]
-async fn switch_agent_degrades_to_hard_stop() {
+async fn switch_agent_succeeds() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = init_db(&dir);
     let config = setup_config(&dir);
 
-    let provider = Arc::new(RecordingProvider::new(vec![vec![Ok(
+    // agent-A: BoomTool (fails).  agent-B: text "ok from agent-2".
+    let provider_a = Arc::new(RecordingProvider::new(vec![vec![Ok(
         StreamChunk::ToolCall {
             id: "tc-1".into(),
             name: "boom".into(),
             input: json!({}),
         },
     )]]));
+    let provider_b = Arc::new(RecordingProvider::new(vec![vec![Ok(StreamChunk::Text {
+        content: "ok from agent-2".into(),
+    })]]));
 
     let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
         Arc::new(BoomTool),
@@ -769,9 +810,12 @@ async fn switch_agent_degrades_to_hard_stop() {
     ];
 
     let factory = Arc::new(GateTestFactory {
-        provider,
+        provider: provider_a,
         tools,
         config: config.clone(),
+        alt_agent_id: Some("test-agent-2".into()),
+        alt_provider: Some(provider_b),
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -781,8 +825,8 @@ async fn switch_agent_degrades_to_hard_stop() {
 rules:
   - error_code: tool_failure
     action: switch_agent
-    target_agent: other-agent
-    reason: "try a different agent"
+    target_agent: test-agent-2
+    reason: "switch to agent-2"
 "#,
     )
     .unwrap();
@@ -810,21 +854,44 @@ rules:
         .expect("should receive a terminal message");
 
     match msg {
-        Message::TaskError(te) => {
-            assert_eq!(te.error_taxonomy, "tool_failure");
+        Message::TaskDone(td_msg) => {
+            // P3.7: TaskDone.agent_id must be the target agent.
+            assert_eq!(td_msg.agent_id, "test-agent-2");
+            assert_eq!(td_msg.outbox.agent_id, "test-agent-2");
         }
-        other => panic!("expected TaskError, got {other:?}"),
+        other => panic!("expected TaskDone, got {other:?}"),
     }
 
+    // 2 DB rows: agent-A error, agent-B done.  parent_run_id linked.
     let conn = pool::open(&db_path).unwrap();
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM agent_runs", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 1);
-    let status: String = conn
-        .query_row("SELECT status FROM agent_runs LIMIT 1", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(status, "error");
+    let runs: Vec<(String, String, Option<String>, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT run_id, status, parent_run_id, spawn_depth FROM agent_runs ORDER BY spawn_depth ASC",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .unwrap();
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].1, "error");
+    assert_eq!(runs[0].3, 0);
+    assert_eq!(runs[1].1, "done");
+    assert_eq!(runs[1].3, 1);
+    assert_eq!(
+        runs[1].2.as_deref(),
+        Some(runs[0].0.as_str()),
+        "switch run should link to first run"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -856,6 +923,9 @@ async fn auth_failure_routes_as_auth_failure() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let registry = CriteriaRegistry::defaults(); // all HardStop
@@ -926,6 +996,9 @@ async fn rate_limited_auto_revision_succeeds() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -1008,6 +1081,9 @@ async fn model_not_found_hard_stop() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let registry = CriteriaRegistry::defaults(); // ModelNotFound → HardStop
@@ -1068,6 +1144,9 @@ async fn provider_timeout_routes_provider_exhausted() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let registry = CriteriaRegistry::defaults();
@@ -1129,6 +1208,9 @@ async fn parse_error_routes_unknown() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let registry = CriteriaRegistry::defaults();
@@ -1194,6 +1276,9 @@ async fn tool_failure_no_provider_error_unchanged() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let registry = CriteriaRegistry::defaults();
@@ -1273,6 +1358,9 @@ async fn streaming_midflight_provider_error_preserved() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let registry = CriteriaRegistry::defaults();
@@ -1346,6 +1434,9 @@ async fn permission_denied_tag_hard_stop() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -1461,6 +1552,9 @@ async fn transient_tool_failure_auto_revision() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -1531,6 +1625,9 @@ async fn configuration_error_blocks_auto_revision() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -1610,6 +1707,9 @@ async fn rate_limited_tags_auto_revision() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let yaml_path = config.gate_criteria_path.clone();
@@ -1718,6 +1818,9 @@ async fn default_rules_unchanged_by_tags() {
         provider,
         tools,
         config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: None,
     });
 
     let registry = CriteriaRegistry::defaults();
@@ -1748,4 +1851,390 @@ async fn default_rules_unchanged_by_tags() {
         }
         other => panic!("expected TaskError, got {other:?}"),
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// P3.7: SwitchAgent tests
+// ──────────────────────────────────────────────────────────────────────
+
+/// P3.7 Test 20: switch_agent then auto_revision on target agent.
+#[tokio::test]
+async fn switch_agent_then_auto_revision() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // agent-A: BoomTool (fails).
+    let provider_a = Arc::new(RecordingProvider::new(vec![vec![Ok(
+        StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        },
+    )]]));
+    // agent-B first call: BoomTool (fails, transient). Second call: text "ok".
+    let provider_b = Arc::new(RecordingProvider::new(vec![
+        vec![Ok(StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        })],
+        vec![Ok(StreamChunk::Text {
+            content: "ok from agent-2".into(),
+        })],
+    ]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider: provider_a,
+        tools,
+        config: config.clone(),
+        alt_agent_id: Some("test-agent-2".into()),
+        alt_provider: Some(provider_b),
+        reject_agent_id: None,
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: tool_failure
+    action: switch_agent
+    target_agent: test-agent-2
+    reason: "switch to agent-2"
+  - error_code: tool_failure
+    action: auto_revision
+    max_retries: 1
+    reason: "one retry on agent-2"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskDone(td_msg) => {
+            assert_eq!(td_msg.agent_id, "test-agent-2");
+        }
+        other => panic!("expected TaskDone, got {other:?}"),
+    }
+
+    // 3 DB rows: agent-A error, agent-B error, agent-B done.
+    let conn = pool::open(&db_path).unwrap();
+    let runs: Vec<(String, String, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, status, spawn_depth FROM agent_runs ORDER BY spawn_depth ASC",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap();
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[0].0, "test-agent");
+    assert_eq!(runs[0].1, "error");
+    assert_eq!(runs[1].0, "test-agent-2");
+    assert_eq!(runs[1].1, "error");
+    assert_eq!(runs[2].0, "test-agent-2");
+    assert_eq!(runs[2].1, "done");
+}
+
+/// P3.7 Test 21: switch_agent build fails → TaskError with target agent_id.
+#[tokio::test]
+async fn switch_agent_build_fails() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // agent-A: BoomTool (fails).
+    let provider_a = Arc::new(RecordingProvider::new(vec![vec![Ok(
+        StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        },
+    )]]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    // Factory rejects test-agent-2 → build will fail.
+    let factory = Arc::new(GateTestFactory {
+        provider: provider_a,
+        tools,
+        config: config.clone(),
+        alt_agent_id: None,
+        alt_provider: None,
+        reject_agent_id: Some("test-agent-2".into()),
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: tool_failure
+    action: switch_agent
+    target_agent: test-agent-2
+    reason: "switch to unknown agent"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            // Build fails → taxonomy Unknown, agent_id is target agent.
+            assert_eq!(te.agent_id, "test-agent-2");
+            assert_eq!(te.error_taxonomy, "unknown");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+
+    // Only 1 DB row: agent-A error.  No target agent row (build failed before insert).
+    let conn = pool::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agent_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+/// P3.7 Test 22: switch_agent feedback mentions old agent name.
+#[tokio::test]
+async fn switch_agent_feedback_mentions_old_agent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // agent-A: BoomTool (fails).
+    let provider_a = Arc::new(RecordingProvider::new(vec![vec![Ok(
+        StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        },
+    )]]));
+    // agent-B: text "retry worked".
+    let provider_b = Arc::new(RecordingProvider::new(vec![vec![Ok(StreamChunk::Text {
+        content: "retry worked".into(),
+    })]]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider: Arc::clone(&provider_a),
+        tools,
+        config: config.clone(),
+        alt_agent_id: Some("test-agent-2".into()),
+        alt_provider: Some(Arc::clone(&provider_b)),
+        reject_agent_id: None,
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: tool_failure
+    action: switch_agent
+    target_agent: test-agent-2
+    reason: "switch to agent-2"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+    assert!(matches!(msg, Message::TaskDone(_)));
+
+    // Inspect agent-B's recorded messages for feedback.
+    let recorded = provider_b.take_recorded();
+    assert!(
+        recorded.len() >= 1,
+        "agent-B should have at least 1 LLM call"
+    );
+    let msgs = &recorded[0];
+    let has_feedback = msgs
+        .iter()
+        .any(|m| m.role == "system" && m.content.contains("Previous agent 'test-agent' failed"));
+    assert!(has_feedback, "feedback should mention old agent name");
+}
+
+/// P3.7 Test 23: switch_agent respects global retry cap.
+#[tokio::test]
+async fn switch_agent_respects_global_cap() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // All providers return BoomTool.
+    let provider = Arc::new(RecordingProvider::new(vec![
+        vec![Ok(StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        })],
+        vec![Ok(StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        })],
+        vec![Ok(StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        })],
+    ]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    // Both agents use the same failing provider.
+    let factory = Arc::new(GateTestFactory {
+        provider: Arc::clone(&provider),
+        tools,
+        config: config.clone(),
+        alt_agent_id: Some("test-agent-2".into()),
+        alt_provider: Some(Arc::clone(&provider)),
+        reject_agent_id: None,
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: tool_failure
+    action: switch_agent
+    target_agent: test-agent-2
+    max_retries: 10
+    reason: "switch to agent-2"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    // max_global_retries=1 → agent-A fail → switch to B → B fail → cap → HardStop.
+    let gate_router = Arc::new(GateRouter::new(registry, 1));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(_) => {}
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+
+    // 2 DB rows: A error, B error.  Capped at retry_count=1 (switch).
+    let conn = pool::open(&db_path).unwrap();
+    let runs: Vec<(String, i64)> = {
+        let mut stmt = conn
+            .prepare("SELECT agent_id, spawn_depth FROM agent_runs ORDER BY spawn_depth ASC")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap();
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].0, "test-agent");
+    assert_eq!(runs[1].0, "test-agent-2");
 }

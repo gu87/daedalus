@@ -2,6 +2,7 @@
 //!
 //! P2.7: bridges IPC Session (P2.5) and Agent Loop lifecycle (P2.6).
 //! P3.4: GateRouter integration + AutoRevision retry loop.
+//! P3.7: SwitchAgent cross-agent dispatch.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,7 @@ use crate::agent::permission::{IpcPermissionBroker, PermissionBroker};
 use crate::agent::r#loop::{AgentLoop, LifecycleContext};
 use crate::config::DaedalusConfig;
 use crate::db::{pool, registry};
-use crate::error::DaedalusError;
+use crate::error::{DaedalusError, ErrorCode};
 use crate::gate::{GateAction, GateContext, GateRouter};
 use crate::ipc::protocol;
 use crate::ipc::session::SessionState;
@@ -108,7 +109,7 @@ impl DaemonContext {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let agent_id = td.agent_id.clone();
+        let initial_agent_id = td.agent_id.clone();
         let task_id = td.task_id.clone();
         let req_id = td.req_id.clone();
         let event_id = td.event_id.clone();
@@ -125,7 +126,10 @@ impl DaemonContext {
         //     Do this BEFORE insert_run: if build fails, we return
         //     system.error without ever creating an agent_runs row.
         let cancel = CancellationToken::new();
-        let agent_loop = match self.factory.build(agent_id.clone(), perm_broker, cancel) {
+        let agent_loop = match self
+            .factory
+            .build(initial_agent_id.clone(), perm_broker, cancel)
+        {
             Ok(al) => al,
             Err(e) => {
                 return Some(protocol::make_error(
@@ -139,7 +143,7 @@ impl DaemonContext {
         // ── 3. Insert queued row (only after build succeeded) ──
         let db_path_for_insert = self.db_path.clone();
         let rid_for_insert = first_run_id.clone();
-        let agid_for_insert = agent_id.clone();
+        let agid_for_insert = initial_agent_id.clone();
         let tid_for_insert = task_id.clone();
         let insert = tokio::task::spawn_blocking(move || {
             let conn = pool::open(&db_path_for_insert)?;
@@ -176,7 +180,7 @@ impl DaemonContext {
             }
         }
 
-        // ── 4. Spawn agent execution with Gate retry loop (P3.4) ──
+        // ── 4. Spawn agent execution with Gate retry loop (P3.4/P3.7) ──
         let db_path = self.db_path.clone();
         let gate_router = Arc::clone(&self.gate_router);
         let factory = Arc::clone(&self.factory);
@@ -184,6 +188,7 @@ impl DaemonContext {
 
         tokio::spawn(async move {
             let mut retry_count: u32 = 0;
+            let mut current_agent_id = initial_agent_id;
             let mut prev_run_id = first_run_id.clone();
             let mut agent_loop = agent_loop;
             let mut lc = LifecycleContext {
@@ -202,7 +207,7 @@ impl DaemonContext {
                             ts: protocol::now_utc(),
                             event_id: event_id.clone(),
                             req_id: req_id.clone(),
-                            agent_id: agent_id.clone(),
+                            agent_id: current_agent_id.clone(),
                             task_id: task_id.clone(),
                             outbox,
                         }));
@@ -214,7 +219,7 @@ impl DaemonContext {
                         let semantic_tags = crate::gate::classify_semantic_tags(&agent_error);
                         let ctx = GateContext {
                             error_code: ec,
-                            agent_id: agent_id.clone(),
+                            agent_id: current_agent_id.clone(),
                             task_id: task_id.clone(),
                             retry_count,
                             semantic_tags,
@@ -226,7 +231,7 @@ impl DaemonContext {
                                     ts: protocol::now_utc(),
                                     event_id: event_id.clone(),
                                     req_id: req_id.clone(),
-                                    agent_id: agent_id.clone(),
+                                    agent_id: current_agent_id.clone(),
                                     task_id: task_id.clone(),
                                     error_taxonomy: taxonomy.into(),
                                     detail: agent_error.detail,
@@ -234,53 +239,35 @@ impl DaemonContext {
                                 let _ = writer_tx2.send(msg).await;
                                 break;
                             }
-                            GateAction::SwitchAgent { .. } => {
-                                eprintln!(
-                                    "daedalusd gate: switch_agent not implemented in P3.5, \
-                                     treating as hard_stop"
-                                );
-                                let taxonomy = agent_error.error_code().as_str();
-                                let msg = Message::TaskError(TaskError {
-                                    ts: protocol::now_utc(),
-                                    event_id: event_id.clone(),
-                                    req_id: req_id.clone(),
-                                    agent_id: agent_id.clone(),
-                                    task_id: task_id.clone(),
-                                    error_taxonomy: taxonomy.into(),
-                                    detail: agent_error.detail,
-                                });
-                                let _ = writer_tx2.send(msg).await;
-                                break;
-                            }
-                            GateAction::AutoRevision => {
+                            GateAction::SwitchAgent {
+                                agent_id: target_agent_id,
+                            } => {
                                 retry_count += 1;
 
-                                // New CancellationToken per retry.
+                                // New CancellationToken per attempt.
                                 let cancel = CancellationToken::new();
-                                // New IpcPermissionBroker per retry.
+                                // New IpcPermissionBroker per attempt.
                                 let broker = Arc::new(IpcPermissionBroker::new(
                                     Arc::clone(&session_state),
                                     writer_tx2.clone(),
                                     PERMISSION_TIMEOUT,
                                 ));
 
-                                // Build-before-insert: if retry build fails,
-                                // send final TaskError, no new DB row.
+                                // Build-before-insert for target agent.
+                                let old_agent = current_agent_id.clone();
                                 let mut new_al =
-                                    match factory.build(agent_id.clone(), broker, cancel) {
+                                    match factory.build(target_agent_id.clone(), broker, cancel) {
                                         Ok(al) => al,
                                         Err(e) => {
                                             let msg = Message::TaskError(TaskError {
                                                 ts: protocol::now_utc(),
                                                 event_id: event_id.clone(),
                                                 req_id: req_id.clone(),
-                                                agent_id: agent_id.clone(),
+                                                agent_id: target_agent_id.clone(),
                                                 task_id: task_id.clone(),
-                                                error_taxonomy: crate::error::ErrorCode::Unknown
-                                                    .as_str()
-                                                    .into(),
+                                                error_taxonomy: ErrorCode::Unknown.as_str().into(),
                                                 detail: format!(
-                                                    "failed to build retry AgentLoop: {e}"
+                                                    "failed to build switch AgentLoop: {e}"
                                                 ),
                                             });
                                             let _ = writer_tx2.send(msg).await;
@@ -288,12 +275,12 @@ impl DaemonContext {
                                         }
                                     };
 
-                                // Insert retry row (parent = previous run).
+                                // Insert retry row for target agent.
                                 let new_run_id = format!("run-{}", uuid::Uuid::new_v4());
                                 let prev = prev_run_id.clone();
                                 let depth = retry_count as i64;
                                 let new_rid = new_run_id.clone();
-                                let agid = agent_id.clone();
+                                let agid = target_agent_id.clone();
                                 let tid = task_id.clone();
                                 let dbp = db_path.clone();
                                 let t_now = std::time::SystemTime::now()
@@ -326,11 +313,124 @@ impl DaemonContext {
                                             ts: protocol::now_utc(),
                                             event_id: event_id.clone(),
                                             req_id: req_id.clone(),
-                                            agent_id: agent_id.clone(),
+                                            agent_id: target_agent_id.clone(),
                                             task_id: task_id.clone(),
-                                            error_taxonomy: crate::error::ErrorCode::Unknown
-                                                .as_str()
+                                            error_taxonomy: ErrorCode::Unknown.as_str().into(),
+                                            detail: format!(
+                                                "failed to insert switch agent_runs row: {e}"
+                                            ),
+                                        });
+                                        let _ = writer_tx2.send(msg).await;
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        let msg = Message::TaskError(TaskError {
+                                            ts: protocol::now_utc(),
+                                            event_id: event_id.clone(),
+                                            req_id: req_id.clone(),
+                                            agent_id: target_agent_id.clone(),
+                                            task_id: task_id.clone(),
+                                            error_taxonomy: ErrorCode::Unknown.as_str().into(),
+                                            detail: "spawn_blocking panic during switch insert_run"
                                                 .into(),
+                                        });
+                                        let _ = writer_tx2.send(msg).await;
+                                        break;
+                                    }
+                                }
+
+                                // Inject feedback mentioning which agent failed.
+                                new_al.set_retry_feedback(&format!(
+                                    "Previous agent '{}' failed: {}\n\
+                                     Please analyse the failure and try a different approach.",
+                                    old_agent, agent_error.detail,
+                                ));
+
+                                prev_run_id = new_run_id.clone();
+                                lc = LifecycleContext {
+                                    run_id: new_run_id,
+                                    db_path: db_path.clone(),
+                                    req_id: req_id.clone(),
+                                };
+                                agent_loop = new_al;
+                                current_agent_id = target_agent_id;
+                                // continue to top of loop
+                            }
+                            GateAction::AutoRevision => {
+                                retry_count += 1;
+
+                                // New CancellationToken per retry.
+                                let cancel = CancellationToken::new();
+                                // New IpcPermissionBroker per retry.
+                                let broker = Arc::new(IpcPermissionBroker::new(
+                                    Arc::clone(&session_state),
+                                    writer_tx2.clone(),
+                                    PERMISSION_TIMEOUT,
+                                ));
+
+                                // Build-before-insert: if retry build fails,
+                                // send final TaskError, no new DB row.
+                                let mut new_al =
+                                    match factory.build(current_agent_id.clone(), broker, cancel) {
+                                        Ok(al) => al,
+                                        Err(e) => {
+                                            let msg = Message::TaskError(TaskError {
+                                                ts: protocol::now_utc(),
+                                                event_id: event_id.clone(),
+                                                req_id: req_id.clone(),
+                                                agent_id: current_agent_id.clone(),
+                                                task_id: task_id.clone(),
+                                                error_taxonomy: ErrorCode::Unknown.as_str().into(),
+                                                detail: format!(
+                                                    "failed to build retry AgentLoop: {e}"
+                                                ),
+                                            });
+                                            let _ = writer_tx2.send(msg).await;
+                                            break;
+                                        }
+                                    };
+
+                                // Insert retry row (parent = previous run).
+                                let new_run_id = format!("run-{}", uuid::Uuid::new_v4());
+                                let prev = prev_run_id.clone();
+                                let depth = retry_count as i64;
+                                let new_rid = new_run_id.clone();
+                                let agid = current_agent_id.clone();
+                                let tid = task_id.clone();
+                                let dbp = db_path.clone();
+                                let t_now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                let insert_result = tokio::task::spawn_blocking(move || {
+                                    let conn = pool::open(&dbp)?;
+                                    registry::insert_run(
+                                        &conn,
+                                        &registry::NewAgentRun {
+                                            run_id: new_rid,
+                                            agent_id: agid,
+                                            task_id: tid,
+                                            parent_run_id: Some(prev),
+                                            spawn_depth: depth,
+                                            spawned_at: t_now,
+                                            timeout_seconds: Some(
+                                                DEFAULT_TASK_TIMEOUT.as_secs() as i64
+                                            ),
+                                        },
+                                    )
+                                })
+                                .await;
+
+                                match insert_result {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => {
+                                        let msg = Message::TaskError(TaskError {
+                                            ts: protocol::now_utc(),
+                                            event_id: event_id.clone(),
+                                            req_id: req_id.clone(),
+                                            agent_id: current_agent_id.clone(),
+                                            task_id: task_id.clone(),
+                                            error_taxonomy: ErrorCode::Unknown.as_str().into(),
                                             detail: format!(
                                                 "failed to insert retry agent_runs row: {e}"
                                             ),
@@ -343,11 +443,9 @@ impl DaemonContext {
                                             ts: protocol::now_utc(),
                                             event_id: event_id.clone(),
                                             req_id: req_id.clone(),
-                                            agent_id: agent_id.clone(),
+                                            agent_id: current_agent_id.clone(),
                                             task_id: task_id.clone(),
-                                            error_taxonomy: crate::error::ErrorCode::Unknown
-                                                .as_str()
-                                                .into(),
+                                            error_taxonomy: ErrorCode::Unknown.as_str().into(),
                                             detail: "spawn_blocking panic during retry insert_run"
                                                 .into(),
                                         });
@@ -376,5 +474,3 @@ impl DaemonContext {
         None
     }
 }
-
-// error_kind_to_str removed — use ErrorCode::from_error_kind().as_str() instead.

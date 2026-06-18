@@ -1,82 +1,67 @@
-# P3.6 实现完成报告：Gate Semantic Tags — 语义标签分类与 Gate 路由增强
+# P3.7 实现完成报告：SwitchAgent — 跨 Agent 分发
 
-> 基于 P3.5（commit `90022fd`），给 Gate 路由增加第二维度：SemanticTag 分类。
-> 同一 ErrorCode 可根据错误详情路由到不同 GateAction。纯规则分类，不调用 LLM。
+> 基于 P3.6（commit `68da5f6`），实现 `GateAction::SwitchAgent { agent_id }`。
+> 原降级为 HardStop → 现实现真正的跨 agent 分发。
 
 ---
 
-## 1. 修改文件清单（3 个）
+## 1. 修改文件清单（2 个）
 
 | 文件 | 操作 | 变更摘要 |
 |------|:---:|------|
-| `daedalusd/src/gate.rs` | 修改 | +`SemanticTag`（6 变体）；+`classify_semantic_tags()`；GateContext +`semantic_tags` +注释修正；GateCriteria +`require_tags`；RawGateRule +`require_tags` +空数组拒绝；resolve() AND tag 匹配；~35 个新单元测试 |
-| `daedalusd/src/daemon.rs` | 修改 | GateContext 构造时调用 `classify_semantic_tags()`（+2 行） |
-| `daedalusd/tests/gate_daemon.rs` | 修改 | 新增 6 个语义标签集成测试（#14-#19） |
+| `daedalusd/src/daemon.rs` | 修改 | `agent_id` 拆为 `initial_agent_id` + `mut current_agent_id`；SwitchAgent arm 从降级 HardStop 改为真正分发：retry_count++、新 CancellationToken/Broker、build-before-insert（target agent）、feedback 注入（含原 agent 名）、current_agent_id 更新、continue loop |
+| `daedalusd/tests/gate_daemon.rs` | 修改 | GateTestFactory +`alt_agent_id`/`alt_provider`/`reject_agent_id`；setup_config 增加 test-agent-2；替换 switch_agent_degrades_to_hard_stop → switch_agent_succeeds；新增 4 个 SwitchAgent 场景测试 |
 
-**未改文件**：`error.rs`、`agent/loop.rs`、`agent/state.rs`、`ipc/*`、`types.rs`、`config.rs`
+**未改文件**：`gate.rs`、`error.rs`、`agent/loop.rs`、`agent/state.rs`、`ipc/*`、`types.rs`、`config.rs`
 
 ---
 
 ## 2. 核心行为
 
-### 2.1 SemanticTag 枚举（6 种）
-
-```rust
-pub enum SemanticTag {
-    Permanent,           // 重试无意义
-    Transient,           // 重试可能恢复
-    NeedsHuman,          // 需人工介入
-    PermissionDenied,    // 权限拒绝
-    ConfigurationError,  // 配置错误
-    ResourceExhausted,   // 资源/配额耗尽
-}
-```
-
-### 2.2 classify_semantic_tags() — 分类规则
-
-| ErrorCode | detail 关键词 | Tags |
-|------|------|------|
-| Cancelled | — | [Permanent] |
-| TaskTimeout | — | [Transient, ResourceExhausted] |
-| ToolFailure | permission denied/denied/not allowed | [Permanent, PermissionDenied] |
-| ToolFailure | not found/missing/temporarily unavailable | [Transient] |
-| ToolFailure | 其他 | [Permanent] |
-| MaxIterations | — | [Transient] |
-| ProviderExhausted | dns/connection refused/tls/timeout/timed out/network | [Transient] |
-| ProviderExhausted | 其他 | [Transient, ResourceExhausted] |
-| ProviderFatal | — | [Permanent] |
-| ModelNotFound | — | [Permanent, ConfigurationError, NeedsHuman] |
-| AuthFailure | — | [Permanent, ConfigurationError, NeedsHuman] |
-| RateLimited | — | [Transient, ResourceExhausted] |
-| Unknown | truncated/incomplete/eof/timeout/timed out | [Transient] |
-| Unknown | 其他 | [Permanent] |
-
-所有匹配 lowercase substring。永不返回空 Vec。
-
-### 2.3 Gate 路由 AND 语义
+### 2.1 agent_id 变量拆分
 
 ```
-for each rule:
-  1. error_code != ctx.error_code → skip
-  2. if require_tags is Some(tags): ANY tag not in ctx.semantic_tags → skip
-  3. if retry_count >= max_retries → skip
-  4. return action
-fall through → HardStop
+spawn_task():
+  initial_agent_id = td.agent_id.clone()    // 外层：首次 build/insert
+  └─ tokio::spawn(async move {
+       mut current_agent_id = initial_agent_id   // 内层：随 switch 更新
+       loop {
+         TaskDone / TaskError / GateContext / retry insert → current_agent_id
+         SwitchAgent { target_agent_id }:
+           factory.build(target_agent_id) → insert_run(target_agent_id)
+           → current_agent_id = target_agent_id
+           → continue
+       }
+     })
 ```
 
-### 2.4 向后兼容
+### 2.2 SwitchAgent arm（与 AutoRevision 复用同一结构）
 
-- 10 条默认规则全部 `require_tags: None`
-- 无 YAML override 时行为与 P3.5 完全一致
-- `require_tags: []` → `DaedalusError::Yaml` 报错
-
-### 2.5 daemon 集成
-
-```rust
-let ec = agent_error.error_code();
-let semantic_tags = crate::gate::classify_semantic_tags(&agent_error);
-let ctx = GateContext { error_code: ec, agent_id, task_id, retry_count, semantic_tags };
 ```
+retry_count += 1
+新 CancellationToken
+新 IpcPermissionBroker
+factory.build(target_agent_id)  // ← 唯一差异
+  → 失败 → TaskError(Unknown, agent_id=target) + break
+insert_run(agent_id=target, parent=prev, depth=retry_count)
+  → 失败 → TaskError(Unknown, agent_id=target) + break
+set_retry_feedback("Previous agent '{old}' failed: {detail}")
+prev_run_id = new_run_id
+lc = LifecycleContext { new_run_id }
+agent_loop = new_al
+current_agent_id = target_agent_id  // ← KEY
+continue loop
+```
+
+### 2.3 终态消息 agent_id
+
+| 终态 | agent_id |
+|------|------|
+| TaskDone（switch 后成功） | target agent |
+| TaskDone.outbox.agent_id | target agent |
+| TaskError（target build 失败） | target agent |
+| TaskError（target insert 失败） | target agent |
+| TaskError（target 执行后 HardStop） | target agent |
 
 ---
 
@@ -84,7 +69,7 @@ let ctx = GateContext { error_code: ec, agent_id, task_id, retry_count, semantic
 
 ```
 cargo fmt --all -- --check               ✅ 通过
-cargo test --workspace                   ✅ 381 passed, 0 failed
+cargo test --workspace                   ✅ 385 passed, 0 failed
   -- --skip long_line_returns_error_and_closes
 cargo clippy --workspace -- -D warnings  ✅ 通过
 ```
@@ -93,29 +78,28 @@ cargo clippy --workspace -- -D warnings  ✅ 通过
 
 | 测试套 | passed | 变化 |
 |--------|-------:|:---:|
-| lib unit（含 gate.rs） | 219 | +35 |
+| lib unit | 219 | — |
 | agent_loop | 20 | — |
 | db_registry | 23 | — |
 | error_code | 10 | — |
 | full_dispatch | 5 | — |
-| gate_daemon | **19** | **+6** |
+| gate_daemon | **23** | **+4** |
 | permission | 13 | — |
 | prompt | 35 | — |
 | protocol | 6 | — |
 | provider | 26 | — |
 | tool_registry | 5 | — |
-| **合计** | **381** | **+41** |
+| **合计** | **385** | **+4** |
 
-### 新增 gate_daemon 集成测试（6 个）
+### 新增/替换 gate_daemon 测试（5 个）
 
 | # | 测试 | 场景 | 断言 |
 |:--|------|------|------|
-| 14 | `permission_denied_tag_hard_stop` | tool_failure+[Permanent] → require_tags:[transient] → skip → HardStop | TaskError |
-| 15 | `transient_tool_failure_auto_revision` | "file not found" → [Transient] → require_tags:[transient] → match → retry | TaskDone |
-| 16 | `configuration_error_blocks_auto_revision` | AuthFailure → [Permanent, ConfigurationError, NeedsHuman] → require_tags:[transient] → skip → HardStop | TaskError |
-| 17 | `rate_limited_tags_auto_revision` | RateLimited → [Transient, ResourceExhausted] → require_tags:[transient,resource_exhausted] → match → retry | TaskDone |
-| 18 | `yaml_empty_require_tags_rejected` | YAML `require_tags: []` → parse error | DaedalusError::Yaml |
-| 19 | `default_rules_unchanged_by_tags` | 无 YAML → 默认 HardStop | TaskError |
+| 6r | `switch_agent_succeeds` | A 失败 → switch → B 成功 | TaskDone.agent_id=B；outbox.agent_id=B；2 DB rows（A error + B done）；ORDER BY spawn_depth ASC |
+| 20 | `switch_agent_then_auto_revision` | A fail → switch B → B fail transient → B auto_revision → B success | TaskDone；3 DB rows；agent_id 序列正确 |
+| 21 | `switch_agent_build_fails` | A fail → switch → target build rejected → TaskError | TaskError.agent_id=target；1 DB row（仅 A 的 error row） |
+| 22 | `switch_agent_feedback_mentions_old_agent` | A fail → switch B → 检查 B 的消息 | feedback 包含 "Previous agent 'test-agent' failed" |
+| 23 | `switch_agent_respects_global_cap` | max_global_retries=1 → A fail → switch B → B fail → cap → HardStop | TaskError；2 DB rows（A error + B error） |
 
 ---
 
@@ -123,16 +107,18 @@ cargo clippy --workspace -- -D warnings  ✅ 通过
 
 | 约束 | 状态 |
 |------|:---:|
+| 不修改 gate.rs API | ✅ |
 | 不修改 error.rs / AgentError | ✅ |
-| 不修改 agent/loop.rs / state.rs | ✅ |
+| 不修改 agent/loop.rs / state.rs / prompt.rs | ✅ |
 | 不修改 IPC 协议 / SQLite schema | ✅ |
-| 不实现 SwitchAgent 分发 | ✅ — P3.7+ |
-| 不实现 LLM SemanticCheck | ✅ |
-| 不引入正则 / 新 crate | ✅ |
-| classify_semantic_tags 纯函数 | ✅ |
+| 不传递 conversation history（仅 feedback 摘要） | ✅ |
+| 不实现跨 task 路由 | ✅ |
+| 不实现回切检测（由 max_global_retries 兜底） | ✅ |
+| 不实现 task_card 改写 | ✅ |
+| 不碰 TaskStatus / pipeline.sqlite / system.ack / event replay | ✅ |
 
 ---
 
 ## 5. 返回 Codex 复审
 
-P3.6 实现完毕，381 测试全过。请 Codex 审查。
+P3.7 实现完毕，385 测试全过。请 Codex 审查。
