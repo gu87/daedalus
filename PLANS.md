@@ -1714,3 +1714,45 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 - PID 初始化 + cleanup `-n` guard，`set -u` 安全
 
 **不做**：Router 热替换、notify watcher、IPC/schema/Gate 修改、认证/HTTPS、凭证热刷新、Gemini/Cohere、daedalus-desktop 真实 IPC、system.ack/pipeline/Omega
+
+---
+
+# Daedalus Phase 5 实施计划
+
+> Phase 4 已封板（fc50448）。Phase 5 聚焦 DAEDALUS.md、Durable Execution、Pipeline 编排。
+> Ω-Agent、MCP Bridge 放 Phase 5+。
+
+## 子任务顺序
+
+```
+P5.1  DAEDALUS.md 项目指令源 [DONE] (07fb756, fixups: 72de9ac, d790b6f, bb9160a)
+  │
+P5.2  Durable Execution (system.ack + event ledger + session.rejoin)
+  │     │
+  │     └─→ P5.3b Pipeline ↔ daemon/Gate/Durable Events 接线
+  │
+P5.3a TaskStatus + tasks 表 + 基础 CRUD（独立于 P5.1/P5.2）
+  │
+  └─→ P5.3b（见上）→ P5.4 Phase 5 验收
+```
+
+## P5.1 DAEDALUS.md 项目指令源 [DONE]
+
+> commits: 07fb756, fixups: 72de9ac, d790b6f, bb9160a
+
+**目标**：补全 Memory Layer 最后一块——新增 DAEDALUS.md 项目级指令源。
+
+**核心能力**：
+- 新增 `DAEDALUS.md` 模板 + `DaedalusMdProvider`（`read_optional`，silent skip）
+- Provider chain 顺序：`[soul] → [daedalus] → [memory] → ... → [skills]`
+- `DAEDALUS_MD_PATH` 环境变量支持，默认 `./DAEDALUS.md`
+- DAEDALUS.md 缺失不报错
+
+**测试**：419 passed（+3 prompt 测试，走真实 `PromptBuilder::new(config)` + EnvGuard）
+
+**返修点**：
+- 72de9ac：测试改为 `PromptBuilder::new(config)` + EnvGuard（HOME + 10 DAEDALUS_* env vars）
+- d790b6f：恢复 `daedalus_md_missing_silent_skip` 的 `#[test]` 属性
+- daedalusd/src/ipc/control.rs 仅为 struct literal 补字段，无 IPC 行为变化
+
+**不做**：其他 Memory Provider（已全部存在）、DAEDALUS.md 热加载
