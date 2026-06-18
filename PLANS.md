@@ -1449,3 +1449,100 @@ cargo clippy --workspace -- -D warnings  ✅ 通过
 - ✅ 不碰 P2.5 IPC/permission/client 现有逻辑
 - ✅ 不新增 ErrorCode / TaskStatus / schema migration
 - ✅ 零 `unsafe`
+
+---
+
+# Daedalus Phase 3 实施计划
+
+> 范围：蓝图第十三节 Gate 与质量体系。实现 ErrorCode 分类、Gate 路由、AutoRevision 重试、ProviderError 粒度保留、SemanticTag 语义标签、SwitchAgent 跨 Agent 分发。
+
+## 子任务顺序
+
+```
+P3.1a Memory SourceProvider [DONE] (703f8d4)
+P3.1b AgentHistoryProvider [DONE] (2826c02)
+  │
+  └─→ P3.2  ErrorCode taxonomy [DONE] (86a9283)
+        │
+        └─→ P3.3  Gate routing system [DONE] (d47ce7c)
+              │
+              └─→ P3.4  daemon Gate 接线 + AutoRevision retry loop [DONE] (ac9273a)
+                    │
+                    ├─→ P3.5  ProviderError → Gate 路由 [DONE] (90022fd)
+                    │     │
+                    │     └─→ P3.6  Gate Semantic Tags [DONE] (68da5f6)
+                    │           │
+                    │           └─→ P3.7  SwitchAgent 跨 Agent 分发 [DONE] (e20e17d, fixup 39f0f48)
+```
+
+## P3.1a Memory SourceProvider [DONE]
+
+> commit: 703f8d4
+
+## P3.1b AgentHistoryProvider [DONE]
+
+> commit: 2826c02
+
+## P3.2 ErrorCode taxonomy [DONE]
+
+> commit: 86a9283
+
+## P3.3 Gate routing system [DONE]
+
+> commit: d47ce7c
+
+## P3.4 daemon Gate 接线 + AutoRevision retry loop [DONE]
+
+> commit: ac9273a
+
+## P3.5 ProviderError → Gate 路由 [DONE]
+
+> commit: 90022fd
+
+**目标**：将 `ErrorCode::from_provider_error()` 接入 daemon Gate 路由路径，使 GateRouter 能区分 AuthFailure/RateLimited/ModelNotFound/Unknown 等细粒度 ErrorCode。
+
+**核心变更**：
+- `AgentError` + `provider_error: Option<ProviderError>` + `error_code()` 唯一真相源
+- `LoopState::Failed` + `provider_error` 字段防止状态机转换丢失
+- `next_chunk_with_cancel` 签名改为返回 `AgentError`
+- daemon Gate 路由统一走 `agent_error.error_code()`
+- DB taxonomy 与 TaskError taxonomy 一致
+
+**测试**：340 passed（+7 gate_daemon 测试）
+
+## P3.6 Gate Semantic Tags [DONE]
+
+> commit: 68da5f6
+
+**目标**：给 Gate 路由增加第二维度——语义标签（SemanticTag）。同一 ErrorCode 可根据错误详情路由到不同 GateAction。纯规则分类，不调用 LLM。
+
+**核心变更**：
+- `SemanticTag` 枚举（6 变体）：Permanent/Transient/NeedsHuman/PermissionDenied/ConfigurationError/ResourceExhausted
+- `classify_semantic_tags(&AgentError) -> Vec<SemanticTag>` 纯函数（lowercase substring 匹配）
+- `GateCriteria` + `require_tags: Option<Vec<SemanticTag>>`（AND 语义）
+- `CriteriaRegistry::resolve()` 增加 tag 匹配逻辑
+- `require_tags: []` → `DaedalusError::Yaml` 报错
+- 默认 10 条规则 `require_tags: None`，向后兼容
+
+**测试**：381 passed（+35 gate 单元测试 +6 gate_daemon 集成测试）
+
+## P3.7 SwitchAgent 跨 Agent 分发 [DONE]
+
+> commit: e20e17d, fixup: 39f0f48
+
+**目标**：实现 `GateAction::SwitchAgent { agent_id }`，从降级 HardStop 改为真正的跨 agent 分发。
+
+**核心变更**：
+- daemon.rs `agent_id` 拆为 `initial_agent_id`（外层） + `mut current_agent_id`（spawn 内层）
+- SwitchAgent arm：retry_count++、新 CancellationToken/Broker、factory.build(target_agent_id)、build-before-insert、feedback 注入（含原 agent 名）、current_agent_id 更新、continue loop
+- 与 AutoRevision 共享同一 retry loop 结构
+- 终态消息 agent_id 反映实际执行/失败的 agent
+
+**测试**：385 passed（+4 gate_daemon 测试，-1 旧降级测试）
+
+**返修点**（39f0f48）：
+- `switch_agent_then_auto_revision` 测试：switch_agent 规则加 `max_retries: 1`，使 auto_revision 可达；增强 recorded messages 断言以区分 SwitchAgent vs AutoRevision
+- daemon.rs `set_retry_feedback` 去重（内部已追加 "Please analyse..."）
+- 主逻辑范围未扩大
+
+**不改**：gate.rs、error.rs、loop.rs、state.rs、IPC、SQLite schema
