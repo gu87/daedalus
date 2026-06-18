@@ -1,8 +1,10 @@
-//! P3.4 — Gate daemon integration tests.
+//! P3.4/P3.5 — Gate daemon integration tests.
 //!
 //! Uses TestAgentLoopFactory (FakeProvider + FakeTool) + real GateRouter
 //! + temp DB to cover spawn_task retry loop behaviour.
+//! P3.5 adds provider-error granularity tests.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -74,24 +76,47 @@ fn make_td(task_card: TaskCard) -> TaskDispatch {
 
 /// FakeProvider that returns preset chunks and records all messages
 /// sent to the LLM (for feedback-injection assertions).
+///
+/// P3.5: supports injecting ProviderError at specific call indices
+/// via `errors` map, returning an error instead of chunks.
 struct RecordingProvider {
     /// Chunks to return per call.  If the Vec has N entries, each
     /// `chat()`/`stream()` call pops the next entry.
     chunk_sets: Mutex<Vec<Vec<Result<StreamChunk, daedalusd::error::ProviderError>>>>,
+    /// P3.5: ProviderError to return for call N instead of chunks.
+    errors: HashMap<usize, daedalusd::error::ProviderError>,
     /// Record of messages arrays sent to the LLM (one Vec per call).
     recorded: Mutex<Vec<Vec<ChatMessage>>>,
+    /// P3.5: call counter shared between chat and stream.
+    call_count: Mutex<usize>,
 }
 
 impl RecordingProvider {
     fn new(chunk_sets: Vec<Vec<Result<StreamChunk, daedalusd::error::ProviderError>>>) -> Self {
         Self {
             chunk_sets: Mutex::new(chunk_sets),
+            errors: HashMap::new(),
             recorded: Mutex::new(Vec::new()),
+            call_count: Mutex::new(0),
         }
+    }
+
+    /// P3.5: register a ProviderError to return on call N (0-based).
+    fn with_error(mut self, call_index: usize, err: daedalusd::error::ProviderError) -> Self {
+        self.errors.insert(call_index, err);
+        self
     }
 
     fn take_recorded(&self) -> Vec<Vec<ChatMessage>> {
         std::mem::take(&mut *self.recorded.lock().unwrap())
+    }
+
+    /// Check and return error if call_index matches an injected error.
+    fn check_error(&self) -> Option<daedalusd::error::ProviderError> {
+        let mut count = self.call_count.lock().unwrap();
+        let idx = *count;
+        *count += 1;
+        self.errors.get(&idx).cloned()
     }
 }
 
@@ -104,10 +129,11 @@ impl LLMProvider for RecordingProvider {
         _config: &ModelConfig,
     ) -> Result<ChatResponse, daedalusd::error::ProviderError> {
         self.recorded.lock().unwrap().push(messages.to_vec());
+        if let Some(err) = self.check_error() {
+            return Err(err);
+        }
         let mut chunk_sets = self.chunk_sets.lock().unwrap();
         let chunks = if chunk_sets.is_empty() {
-            // Default: return empty text (task_done will still be called by
-            // the FakeTool).
             vec![]
         } else {
             chunk_sets.remove(0)
@@ -139,8 +165,10 @@ impl LLMProvider for RecordingProvider {
         _tools: &[ToolDef],
         _config: &ModelConfig,
     ) -> Result<StreamHandle, daedalusd::error::ProviderError> {
-        // Record once, then stream chunks directly.
         self.recorded.lock().unwrap().push(messages.to_vec());
+        if let Some(err) = self.check_error() {
+            return Err(err);
+        }
         let mut chunk_sets = self.chunk_sets.lock().unwrap();
         let chunks = if chunk_sets.is_empty() {
             vec![]
@@ -286,16 +314,15 @@ impl daedalusd::tools::Tool for BoomTool {
     }
 }
 
-// ── tests ────────────────────────────────────────────────────────────
+// ── tests (1-6: P3.4, 7-13: P3.5) ──────────────────────────────────
 
-/// Test 1: defaults all HardStop — tool failure → single TaskError, 1 DB row error.
+/// Test 1 (P3.4): defaults all HardStop — tool failure → single TaskError.
 #[tokio::test]
 async fn hard_stop_default_tool_failure() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = init_db(&dir);
     let config = setup_config(&dir);
 
-    // Provider returns a tool_call for "boom" (the failing tool).
     let provider = Arc::new(RecordingProvider::new(vec![vec![Ok(
         StreamChunk::ToolCall {
             id: "tc-1".into(),
@@ -315,7 +342,7 @@ async fn hard_stop_default_tool_failure() {
         config: config.clone(),
     });
 
-    let registry = CriteriaRegistry::defaults(); // all HardStop
+    let registry = CriteriaRegistry::defaults();
     let gate_router = Arc::new(GateRouter::new(registry, 5));
 
     let ctx = Arc::new(DaemonContext {
@@ -330,9 +357,8 @@ async fn hard_stop_default_tool_failure() {
     let session_state = Arc::new(SessionState::default());
 
     let result = ctx.spawn_task(&td, writer_tx, session_state).await;
-    assert!(result.is_none(), "spawn_task should return None on success");
+    assert!(result.is_none());
 
-    // Wait for the final message.
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
         .await
         .unwrap()
@@ -346,7 +372,6 @@ async fn hard_stop_default_tool_failure() {
         other => panic!("expected TaskError, got {other:?}"),
     }
 
-    // One DB row, status=error.
     let conn = pool::open(&db_path).unwrap();
     let runs: Vec<_> = {
         let mut stmt = conn
@@ -367,21 +392,20 @@ async fn hard_stop_default_tool_failure() {
             .unwrap();
         rows.filter_map(|r| r.ok()).collect::<Vec<_>>()
     };
-    assert_eq!(runs.len(), 1, "should have exactly 1 agent_runs row");
+    assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].1, "error");
     assert_eq!(runs[0].2.as_deref(), Some("tool_failure"));
-    assert_eq!(runs[0].3, None, "parent_run_id should be NULL");
-    assert_eq!(runs[0].4, 0, "spawn_depth should be 0");
+    assert_eq!(runs[0].3, None);
+    assert_eq!(runs[0].4, 0);
 }
 
-/// Test 2: AutoRevision single retry succeeds.
+/// Test 2 (P3.4): AutoRevision single retry succeeds.
 #[tokio::test]
 async fn auto_revision_single_retry_succeeds() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = init_db(&dir);
     let config = setup_config(&dir);
 
-    // First call: tool_call "boom" (fails).  Second call: text "all good".
     let provider = Arc::new(RecordingProvider::new(vec![
         vec![Ok(StreamChunk::ToolCall {
             id: "tc-1".into(),
@@ -404,7 +428,6 @@ async fn auto_revision_single_retry_succeeds() {
         config: config.clone(),
     });
 
-    // Write YAML: tool_failure → auto_revision max_retries=3.
     let yaml_path = config.gate_criteria_path.clone();
     std::fs::write(
         &yaml_path,
@@ -441,15 +464,16 @@ rules:
         .expect("should receive a terminal message");
 
     match msg {
-        Message::TaskDone(_) => {} // success!
+        Message::TaskDone(_) => {}
         other => panic!("expected TaskDone, got {other:?}"),
     }
 
-    // Two DB rows: first error, second done, parent_run_id linked.
     let conn = pool::open(&db_path).unwrap();
     let runs: Vec<(String, String, Option<String>, i64)> = {
         let mut stmt = conn
-            .prepare("SELECT run_id, status, parent_run_id, spawn_depth FROM agent_runs ORDER BY spawned_at")
+            .prepare(
+                "SELECT run_id, status, parent_run_id, spawn_depth FROM agent_runs ORDER BY spawned_at",
+            )
             .unwrap();
         let rows = stmt
             .query_map([], |row| {
@@ -466,23 +490,18 @@ rules:
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].1, "error");
     assert_eq!(runs[1].1, "done");
-    assert_eq!(
-        runs[1].2.as_deref(),
-        Some(runs[0].0.as_str()),
-        "retry should link to first run"
-    );
+    assert_eq!(runs[1].2.as_deref(), Some(runs[0].0.as_str()));
     assert_eq!(runs[0].3, 0);
     assert_eq!(runs[1].3, 1);
 }
 
-/// Test 3: AutoRevision max_retries exceeded — all fail, final TaskError.
+/// Test 3 (P3.4): AutoRevision max_retries exceeded.
 #[tokio::test]
 async fn auto_revision_max_retries_exceeded() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = init_db(&dir);
     let config = setup_config(&dir);
 
-    // All calls return "boom".
     let mut chunk_sets = Vec::new();
     for _ in 0..5 {
         chunk_sets.push(vec![Ok(StreamChunk::ToolCall {
@@ -518,7 +537,6 @@ rules:
     .unwrap();
 
     let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
-    // max_global_retries=10 so only criteria max_retries limits us.
     let gate_router = Arc::new(GateRouter::new(registry, 10));
 
     let ctx = Arc::new(DaemonContext {
@@ -547,7 +565,6 @@ rules:
         other => panic!("expected TaskError, got {other:?}"),
     }
 
-    // 3 DB rows (attempt 0, 1, 2), all error.
     let conn = pool::open(&db_path).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM agent_runs", [], |r| r.get(0))
@@ -563,7 +580,7 @@ rules:
     assert_eq!(error_count, 3);
 }
 
-/// Test 4: global cap blocks auto_revision.
+/// Test 4 (P3.4): global cap blocks auto_revision.
 #[tokio::test]
 async fn global_cap_blocks_auto_revision() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -605,7 +622,6 @@ rules:
     .unwrap();
 
     let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
-    // max_global_retries=1 → second failure triggers HardStop.
     let gate_router = Arc::new(GateRouter::new(registry, 1));
 
     let ctx = Arc::new(DaemonContext {
@@ -632,7 +648,6 @@ rules:
         other => panic!("expected TaskError, got {other:?}"),
     }
 
-    // 2 DB rows (attempt 0 succeeded by retry 1 blocked by cap), both error.
     let conn = pool::open(&db_path).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM agent_runs", [], |r| r.get(0))
@@ -648,14 +663,13 @@ rules:
     assert_eq!(error_count, 2);
 }
 
-/// Test 5: retry feedback injected AFTER system prompt.
+/// Test 5 (P3.4): retry feedback injected AFTER system prompt.
 #[tokio::test]
 async fn retry_feedback_injected_after_system_prompt() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = init_db(&dir);
     let config = setup_config(&dir);
 
-    // First call: "boom" (fails).  Second call: text "done".
     let provider = Arc::new(RecordingProvider::new(vec![
         vec![Ok(StreamChunk::ToolCall {
             id: "tc-1".into(),
@@ -714,46 +728,27 @@ rules:
         .expect("should receive a terminal message");
     assert!(matches!(msg, Message::TaskDone(_)));
 
-    // Inspect recorded messages from second LLM call.
     let recorded = provider.take_recorded();
-    assert!(
-        recorded.len() >= 2,
-        "should have at least 2 LLM calls, got {}",
-        recorded.len()
-    );
+    assert!(recorded.len() >= 2);
 
     let second_call = &recorded[1];
-    // First message should be the system prompt.
     let first_role = &second_call[0].role;
-    assert_eq!(
-        first_role, "system",
-        "first message should be system prompt"
-    );
+    assert_eq!(first_role, "system");
 
-    // There should be a retry feedback message after the system prompt.
     let has_feedback = second_call
         .iter()
         .any(|m| m.role == "system" && m.content.contains("Previous attempt failed:"));
-    assert!(has_feedback, "retry feedback not found in messages");
+    assert!(has_feedback);
 
-    // The feedback should NOT be the first message (it comes after system prompt).
     let feedback_idx = second_call
         .iter()
         .position(|m| m.content.contains("Previous attempt failed:"))
         .unwrap();
-    assert!(
-        feedback_idx > 0,
-        "feedback should not be the first message (was at index {feedback_idx})"
-    );
-
-    // The system prompt (index 0) should NOT contain the feedback text.
-    assert!(
-        !second_call[0].content.contains("Previous attempt failed:"),
-        "system prompt should not contain retry feedback"
-    );
+    assert!(feedback_idx > 0);
+    assert!(!second_call[0].content.contains("Previous attempt failed:"));
 }
 
-/// Test 6: switch_agent degrades to hard_stop.
+/// Test 6 (P3.4): switch_agent degrades to hard_stop.
 #[tokio::test]
 async fn switch_agent_degrades_to_hard_stop() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -821,7 +816,6 @@ rules:
         other => panic!("expected TaskError, got {other:?}"),
     }
 
-    // 1 DB row, status=error.  No retry attempted.
     let conn = pool::open(&db_path).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM agent_runs", [], |r| r.get(0))
@@ -831,4 +825,494 @@ rules:
         .query_row("SELECT status FROM agent_runs LIMIT 1", [], |r| r.get(0))
         .unwrap();
     assert_eq!(status, "error");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// P3.5: provider-error granularity tests
+// ──────────────────────────────────────────────────────────────────────
+
+/// P3.5 Test 7: ProviderError::Auth routes as auth_failure.
+#[tokio::test]
+async fn auth_failure_routes_as_auth_failure() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // Provider returns Auth(401) — stream() will return this error.
+    let provider = Arc::new(RecordingProvider::new(vec![]).with_error(
+        0,
+        daedalusd::error::ProviderError::Auth {
+            status: 401,
+            body: "bad key".into(),
+        },
+    ));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let registry = CriteriaRegistry::defaults(); // all HardStop
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            assert_eq!(te.error_taxonomy, "auth_failure");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+
+    let conn = pool::open(&db_path).unwrap();
+    let taxonomy: Option<String> = conn
+        .query_row("SELECT error_taxonomy FROM agent_runs LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(taxonomy.as_deref(), Some("auth_failure"));
+}
+
+/// P3.5 Test 8: RateLimited → auto_revision → retry succeeds.
+#[tokio::test]
+async fn rate_limited_auto_revision_succeeds() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // Call 0: RateLimited.  Call 1: text "ok".
+    let provider = Arc::new(
+        RecordingProvider::new(vec![vec![Ok(StreamChunk::Text {
+            content: "ok".into(),
+        })]])
+        .with_error(
+            0,
+            daedalusd::error::ProviderError::RateLimited {
+                status: 429,
+                body: "too many requests".into(),
+            },
+        ),
+    );
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let yaml_path = config.gate_criteria_path.clone();
+    std::fs::write(
+        &yaml_path,
+        r#"
+rules:
+  - error_code: rate_limited
+    action: auto_revision
+    max_retries: 3
+    reason: "retry rate limited calls"
+"#,
+    )
+    .unwrap();
+
+    let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskDone(_) => {}
+        other => panic!("expected TaskDone, got {other:?}"),
+    }
+
+    let conn = pool::open(&db_path).unwrap();
+    // 2 rows: first error (rate_limited), second done.
+    let runs: Vec<(String, Option<String>)> = {
+        let mut stmt = conn
+            .prepare("SELECT status, error_taxonomy FROM agent_runs ORDER BY spawned_at")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap();
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].0, "error");
+    assert_eq!(runs[0].1.as_deref(), Some("rate_limited"));
+    assert_eq!(runs[1].0, "done");
+}
+
+/// P3.5 Test 9: ModelNotFound → HardStop.
+#[tokio::test]
+async fn model_not_found_hard_stop() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    let provider = Arc::new(RecordingProvider::new(vec![]).with_error(
+        0,
+        daedalusd::error::ProviderError::ModelNotFound("gpt-5".into()),
+    ));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let registry = CriteriaRegistry::defaults(); // ModelNotFound → HardStop
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            assert_eq!(te.error_taxonomy, "model_not_found");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+
+    let conn = pool::open(&db_path).unwrap();
+    let taxonomy: Option<String> = conn
+        .query_row("SELECT error_taxonomy FROM agent_runs LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(taxonomy.as_deref(), Some("model_not_found"));
+}
+
+/// P3.5 Test 10: ProviderError::Timeout → provider_exhausted.
+#[tokio::test]
+async fn provider_timeout_routes_provider_exhausted() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    let provider = Arc::new(
+        RecordingProvider::new(vec![]).with_error(0, daedalusd::error::ProviderError::Timeout),
+    );
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let registry = CriteriaRegistry::defaults();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            assert_eq!(te.error_taxonomy, "provider_exhausted");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+
+    let conn = pool::open(&db_path).unwrap();
+    let taxonomy: Option<String> = conn
+        .query_row("SELECT error_taxonomy FROM agent_runs LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(taxonomy.as_deref(), Some("provider_exhausted"));
+}
+
+/// P3.5 Test 11: ProviderError::Parse → Unknown → HardStop.
+#[tokio::test]
+async fn parse_error_routes_unknown() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    let provider = Arc::new(RecordingProvider::new(vec![]).with_error(
+        0,
+        daedalusd::error::ProviderError::Parse("malformed JSON".into()),
+    ));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let registry = CriteriaRegistry::defaults();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            assert_eq!(te.error_taxonomy, "unknown");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+
+    let conn = pool::open(&db_path).unwrap();
+    let taxonomy: Option<String> = conn
+        .query_row("SELECT error_taxonomy FROM agent_runs LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(taxonomy.as_deref(), Some("unknown"));
+}
+
+/// P3.5 Test 12: ToolFailure with no provider_error is unchanged.
+#[tokio::test]
+async fn tool_failure_no_provider_error_unchanged() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // BoomTool triggers tool_failure — no provider_error involved.
+    let provider = Arc::new(RecordingProvider::new(vec![vec![Ok(
+        StreamChunk::ToolCall {
+            id: "tc-1".into(),
+            name: "boom".into(),
+            input: json!({}),
+        },
+    )]]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let registry = CriteriaRegistry::defaults();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            // provider_error=None → falls back to from_error_kind → tool_failure
+            assert_eq!(te.error_taxonomy, "tool_failure");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+
+    let conn = pool::open(&db_path).unwrap();
+    let taxonomy: Option<String> = conn
+        .query_row("SELECT error_taxonomy FROM agent_runs LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(taxonomy.as_deref(), Some("tool_failure"));
+}
+
+/// P3.5 Test 13: mid-flight streaming ProviderError preserved.
+///
+/// Stream is established successfully (first chunk is Text), then the
+/// next chunk returns a ProviderError — this exercises next_chunk_with_cancel.
+#[tokio::test]
+async fn streaming_midflight_provider_error_preserved() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = init_db(&dir);
+    let config = setup_config(&dir);
+
+    // The RecordingProvider treats chunk_sets as Vec<Vec<Result<StreamChunk, ...>>>.
+    // Each inner Vec is the set of chunks for a single call.
+    // Call 0 has: Text "started..." then a ToolCall to task_done (completes normally).
+    // But we want to test stream mid-flight failure.
+    //
+    // New approach: use a special stream provider that sends chunks
+    // with Err(ProviderError) at position 1 in the chunk list.
+
+    // Stream returns [Ok(Text("hi")), Err(Auth)] — first chunk ok, second fails.
+    let provider = Arc::new(RecordingProvider::new(vec![vec![
+        Ok(StreamChunk::Text {
+            content: "hi".into(),
+        }),
+        Err(daedalusd::error::ProviderError::Auth {
+            status: 403,
+            body: "forbidden".into(),
+        }),
+    ]]));
+
+    let tools: Vec<Arc<dyn daedalusd::tools::Tool>> = vec![
+        Arc::new(BoomTool),
+        Arc::new(daedalusd::tools::task_done::TaskDoneTool),
+    ];
+
+    let factory = Arc::new(GateTestFactory {
+        provider,
+        tools,
+        config: config.clone(),
+    });
+
+    let registry = CriteriaRegistry::defaults();
+    let gate_router = Arc::new(GateRouter::new(registry, 5));
+
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: db_path.clone(),
+        factory,
+        gate_router,
+    });
+
+    let td = make_td(dummy_task_card());
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
+    let session_state = Arc::new(SessionState::default());
+
+    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    assert!(result.is_none());
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+        .await
+        .unwrap()
+        .expect("should receive a terminal message");
+
+    match msg {
+        Message::TaskError(te) => {
+            // next_chunk_with_cancel gets Err(Auth{403}) from stream,
+            // preserves ProviderError in AgentError,
+            // → LoopState::Failed with provider_error=Some(Auth)
+            // → AgentError::error_code() → ErrorCode::AuthFailure
+            assert_eq!(te.error_taxonomy, "auth_failure");
+        }
+        other => panic!("expected TaskError, got {other:?}"),
+    }
+
+    let conn = pool::open(&db_path).unwrap();
+    let taxonomy: Option<String> = conn
+        .query_row("SELECT error_taxonomy FROM agent_runs LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(taxonomy.as_deref(), Some("auth_failure"));
 }

@@ -67,6 +67,29 @@ pub enum ErrorKind {
 pub struct AgentError {
     pub reason: ErrorKind,
     pub detail: String,
+    /// P3.5: original ProviderError when this error came from an LLM provider.
+    /// Consumed by [`AgentError::error_code`] for Gate routing / DB taxonomy.
+    pub provider_error: Option<ProviderError>,
+}
+
+impl AgentError {
+    /// Return the canonical [`ErrorCode`] for this error.
+    ///
+    /// When `provider_error` is `Some`, delegates to
+    /// [`ErrorCode::from_provider_error`] (granular: AuthFailure /
+    /// RateLimited / ModelNotFound / ProviderExhausted / ProviderFatal /
+    /// Unknown).  Otherwise falls back to [`ErrorCode::from_error_kind`]
+    /// (coarse: Cancelled / TaskTimeout / ToolFailure / MaxIterations /
+    /// ProviderExhausted / ProviderFatal).
+    ///
+    /// This is the **single source of truth** for DB taxonomy and
+    /// `TaskError.error_taxonomy`.
+    pub fn error_code(&self) -> ErrorCode {
+        self.provider_error
+            .as_ref()
+            .map(ErrorCode::from_provider_error)
+            .unwrap_or_else(|| ErrorCode::from_error_kind(&self.reason))
+    }
 }
 
 impl fmt::Display for AgentError {

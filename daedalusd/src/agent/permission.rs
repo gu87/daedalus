@@ -97,6 +97,7 @@ impl PermissionBroker for IpcPermissionBroker {
             return Err(AgentError {
                 reason: ErrorKind::Cancelled,
                 detail: "req_id must not be empty".into(),
+                provider_error: None,
             });
         }
 
@@ -134,6 +135,7 @@ impl PermissionBroker for IpcPermissionBroker {
             return Err(AgentError {
                 reason: ErrorKind::Cancelled,
                 detail: "permission request send failed: connection lost".into(),
+                provider_error: None,
             });
         }
 
@@ -149,6 +151,7 @@ impl PermissionBroker for IpcPermissionBroker {
                         return Err(AgentError {
                             reason: ErrorKind::Cancelled,
                             detail: "permission interrupted: connection lost".into(),
+                            provider_error: None,
                         });
                     }
                 }
@@ -166,6 +169,7 @@ impl PermissionBroker for IpcPermissionBroker {
                 return Err(AgentError {
                     reason: ErrorKind::Cancelled,
                     detail: "permission interrupted: session closed".into(),
+                    provider_error: None,
                 });
             }
         };

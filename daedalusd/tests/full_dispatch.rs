@@ -669,7 +669,7 @@ async fn full_dispatch_task_error_provider_fatal() {
         let line = buf.trim_end().to_string();
         if line.contains("\"type\":\"task.error\"") {
             let obj: serde_json::Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(obj["error_taxonomy"], "provider_fatal");
+            assert_eq!(obj["error_taxonomy"], "auth_failure");
             assert_eq!(obj["req_id"], "req-err");
             assert_eq!(obj["task_id"], "task-err");
 
@@ -687,7 +687,7 @@ async fn full_dispatch_task_error_provider_fatal() {
             assert_eq!(rows.len(), 1);
             let run = registry::get_run(&conn, &rows[0]).unwrap().unwrap();
             assert_eq!(run.status, registry::AgentRunStatus::Error);
-            assert_eq!(run.error_taxonomy.as_deref(), Some("provider_fatal"));
+            assert_eq!(run.error_taxonomy.as_deref(), Some("auth_failure"));
             assert!(run.completed_at.is_some());
             return;
         }

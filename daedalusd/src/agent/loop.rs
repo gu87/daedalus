@@ -208,11 +208,13 @@ impl AgentLoop {
                 let conn = crate::db::pool::open(&db_path).map_err(|e| AgentError {
                     reason: ErrorKind::ToolFailure,
                     detail: format!("lifecycle db open: {e}"),
+                    provider_error: None,
                 })?;
                 crate::db::registry::transition_to_running(&conn, &run_id, now).map_err(|e| {
                     AgentError {
                         reason: ErrorKind::ToolFailure,
                         detail: format!("lifecycle transition_to_running: {e}"),
+                        provider_error: None,
                     }
                 })
             })
@@ -220,6 +222,7 @@ impl AgentLoop {
             .map_err(|_| AgentError {
                 reason: ErrorKind::ToolFailure,
                 detail: "lifecycle spawn_blocking panic".into(),
+                provider_error: None,
             })??;
 
             if rows == 0 {
@@ -229,6 +232,7 @@ impl AgentLoop {
                         "transition_to_running affected 0 rows — run {} not in queued state",
                         lc.run_id
                     ),
+                    provider_error: None,
                 });
             }
         }
@@ -310,6 +314,7 @@ impl AgentLoop {
                         Err(e) => LoopState::Failed {
                             reason: ErrorKind::ToolFailure,
                             detail: format!("prompt: {e}"),
+                            provider_error: None,
                         },
                     }
                 }
@@ -321,6 +326,7 @@ impl AgentLoop {
                         LoopState::Failed {
                             reason: ErrorKind::MaxIterations,
                             detail: format!("exceeded {MAX_ITERATIONS} LLM round-trips"),
+                            provider_error: None,
                         }
                     } else {
                         match self.stream_with_cancel(&messages, &tools).await {
@@ -329,13 +335,11 @@ impl AgentLoop {
                                 assistant_text: String::new(),
                                 tool_calls: Vec::new(),
                             },
-                            Err(e) => {
-                                let detail = format!("{e}");
-                                LoopState::Failed {
-                                    reason: e.reason,
-                                    detail,
-                                }
-                            }
+                            Err(e) => LoopState::Failed {
+                                reason: e.reason,
+                                detail: e.detail,
+                                provider_error: e.provider_error,
+                            },
                         }
                     }
                 }
@@ -347,17 +351,16 @@ impl AgentLoop {
                     mut tool_calls,
                 } => {
                     match self.next_chunk_with_cancel(&mut stream).await {
-                        Err(reason) => {
+                        Err(agent_error) => {
                             self.messages.push(ChatMessage {
                                 role: "assistant".into(),
                                 content: assistant_text,
                             });
-                            let detail = match reason {
-                                ErrorKind::TaskTimeout => "task timed out".to_string(),
-                                ErrorKind::Cancelled => "task cancelled".to_string(),
-                                _ => "task interrupted".to_string(),
-                            };
-                            LoopState::Failed { reason, detail }
+                            LoopState::Failed {
+                                reason: agent_error.reason,
+                                detail: agent_error.detail,
+                                provider_error: agent_error.provider_error,
+                            }
                         }
                         Ok(None) => {
                             // Stream ended.  Push assistant text, then
@@ -462,6 +465,7 @@ impl AgentLoop {
                                     Err(e) => LoopState::Failed {
                                         reason: e.reason,
                                         detail: e.detail,
+                                        provider_error: None,
                                     },
                                 }
                             }
@@ -474,6 +478,7 @@ impl AgentLoop {
                             LoopState::Failed {
                                 reason: e.reason,
                                 detail: e.detail,
+                                provider_error: None,
                             }
                         }
                     }
@@ -535,6 +540,7 @@ impl AgentLoop {
                                                 Err(e) => LoopState::Failed {
                                                     reason: e.reason,
                                                     detail: e.detail,
+                                                    provider_error: None,
                                                 },
                                             }
                                         }
@@ -546,6 +552,7 @@ impl AgentLoop {
                                             LoopState::Failed {
                                                 reason: e.reason,
                                                 detail: e.detail,
+                                                provider_error: None,
                                             }
                                         }
                                     }
@@ -566,6 +573,7 @@ impl AgentLoop {
                             LoopState::Failed {
                                 reason: cr.get(),
                                 detail: "permission interrupted".into(),
+                                provider_error: None,
                             }
                         }
                     }
@@ -630,15 +638,26 @@ impl AgentLoop {
                     }
                     return Ok(*outbox);
                 }
-                LoopState::Failed { reason, detail } => {
+                LoopState::Failed {
+                    reason,
+                    detail,
+                    provider_error,
+                } => {
                     // ── lifecycle: stop heartbeat + write error/cancelled ──
                     if let Some((lc, hb)) = lifecycle.take() {
                         hb.abort();
                         let db_path = lc.db_path.clone();
                         let run_id = lc.run_id.clone();
-                        let taxonomy = crate::error::ErrorCode::from_error_kind(&reason)
-                            .as_str()
-                            .to_string();
+                        // P3.5: use AgentError::error_code() as single source of truth
+                        // so DB taxonomy matches TaskError taxonomy.
+                        let taxonomy = AgentError {
+                            reason: reason.clone(),
+                            detail: detail.clone(),
+                            provider_error: provider_error.clone(),
+                        }
+                        .error_code()
+                        .as_str()
+                        .to_string();
                         let is_cancelled = reason == ErrorKind::Cancelled;
                         let now = now_secs();
                         let rid = run_id.clone();
@@ -685,7 +704,11 @@ impl AgentLoop {
                             );
                         }
                     }
-                    return Err(AgentError { reason, detail });
+                    return Err(AgentError {
+                        reason,
+                        detail,
+                        provider_error,
+                    });
                 }
                 LoopState::Idle => unreachable!(),
             };
@@ -725,11 +748,22 @@ impl AgentLoop {
                     AgentError {
                         reason,
                         detail: format!("{e}"),
+                        provider_error: Some(e),
                     }
                 })
             }
             _ = token.cancelled() => {
-                Err(AgentError { reason: cr.get(), detail: "stream cancelled".into() })
+                let reason = cr.get();
+                let detail = match reason {
+                    ErrorKind::TaskTimeout => "task timed out".into(),
+                    ErrorKind::Cancelled => "task cancelled".into(),
+                    _ => "task interrupted".into(),
+                };
+                Err(AgentError {
+                    reason,
+                    detail,
+                    provider_error: None,
+                })
             }
         }
     }
@@ -737,18 +771,36 @@ impl AgentLoop {
     async fn next_chunk_with_cancel(
         &self,
         stream: &mut StreamHandle,
-    ) -> Result<Option<StreamChunk>, ErrorKind> {
+    ) -> Result<Option<StreamChunk>, AgentError> {
         let token = self.cancel_token.clone();
         let cr = Arc::clone(&self.cancel_reason);
         select! {
             chunk = stream.next() => {
                 Ok(chunk.transpose().map_err(|e| {
-                    if e.is_fallbackable() { ErrorKind::ProviderExhausted }
-                    else { ErrorKind::ProviderFatal }
+                    let reason = if e.is_fallbackable() {
+                        ErrorKind::ProviderExhausted
+                    } else {
+                        ErrorKind::ProviderFatal
+                    };
+                    AgentError {
+                        reason,
+                        detail: format!("{e}"),
+                        provider_error: Some(e),
+                    }
                 })?)
             }
             _ = token.cancelled() => {
-                Err(cr.get())
+                let reason = cr.get();
+                let detail = match reason {
+                    ErrorKind::TaskTimeout => "task timed out".into(),
+                    ErrorKind::Cancelled => "task cancelled".into(),
+                    _ => "task interrupted".into(),
+                };
+                Err(AgentError {
+                    reason,
+                    detail,
+                    provider_error: None,
+                })
             }
         }
     }
@@ -773,12 +825,14 @@ impl AgentLoop {
                 result.map_err(|e| AgentError {
                     reason: ErrorKind::ToolFailure,
                     detail: format!("{e}"),
+                    provider_error: None,
                 })
             }
             _ = token.cancelled() => {
                 Err(AgentError {
                     reason: cr.get(),
                     detail: "tool execution interrupted".into(),
+                    provider_error: None,
                 })
             }
         }
@@ -793,6 +847,7 @@ impl AgentLoop {
         let tool = self.tool_registry.get(&tc.name).ok_or_else(|| AgentError {
             reason: ErrorKind::ToolFailure,
             detail: format!("unknown tool: {}", tc.name),
+            provider_error: None,
         })?;
 
         let allowed = tool.allowed_agents();
@@ -803,6 +858,7 @@ impl AgentLoop {
                     "agent '{}' is not allowed to use tool '{}'",
                     self.agent_id, tc.name
                 ),
+                provider_error: None,
             });
         }
 

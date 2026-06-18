@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use crate::error::ErrorKind;
+use crate::error::{ErrorKind, ProviderError};
 use crate::types::{ChatMessage, Outbox, TaskCard, ToolCall, ToolDef};
 
 use crate::llm::StreamHandle;
@@ -91,5 +91,11 @@ pub(crate) enum LoopState {
     Done { outbox: Box<Outbox> },
 
     /// Task failed with a specific reason.
-    Failed { reason: ErrorKind, detail: String },
+    Failed {
+        reason: ErrorKind,
+        detail: String,
+        /// P3.5: preserved so the Failed arm can reconstruct AgentError
+        /// with the original ProviderError for Gate routing granularity.
+        provider_error: Option<ProviderError>,
+    },
 }

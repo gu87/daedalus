@@ -210,7 +210,7 @@ impl DaemonContext {
                         break;
                     }
                     Err(agent_error) => {
-                        let ec = crate::error::ErrorCode::from_error_kind(&agent_error.reason);
+                        let ec = agent_error.error_code();
                         let ctx = GateContext {
                             error_code: ec,
                             agent_id: agent_id.clone(),
@@ -219,9 +219,7 @@ impl DaemonContext {
                         };
                         match gate_router.route(&ctx) {
                             GateAction::HardStop => {
-                                let taxonomy =
-                                    crate::error::ErrorCode::from_error_kind(&agent_error.reason)
-                                        .as_str();
+                                let taxonomy = agent_error.error_code().as_str();
                                 let msg = Message::TaskError(TaskError {
                                     ts: protocol::now_utc(),
                                     event_id: event_id.clone(),
@@ -236,12 +234,10 @@ impl DaemonContext {
                             }
                             GateAction::SwitchAgent { .. } => {
                                 eprintln!(
-                                    "daedalusd gate: switch_agent not implemented in P3.4, \
+                                    "daedalusd gate: switch_agent not implemented in P3.5, \
                                      treating as hard_stop"
                                 );
-                                let taxonomy =
-                                    crate::error::ErrorCode::from_error_kind(&agent_error.reason)
-                                        .as_str();
+                                let taxonomy = agent_error.error_code().as_str();
                                 let msg = Message::TaskError(TaskError {
                                     ts: protocol::now_utc(),
                                     event_id: event_id.clone(),
