@@ -843,6 +843,7 @@ fn prompt_builder_new_includes_daedalus_between_soul_and_memory() {
     );
 }
 
+#[test]
 fn daedalus_md_missing_silent_skip() {
     let dir = tempfile::TempDir::new().unwrap();
     let base = dir.path().to_string_lossy().to_string();
