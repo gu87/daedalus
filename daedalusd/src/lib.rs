@@ -3,6 +3,7 @@ pub mod config;
 pub mod daemon;
 pub mod db;
 pub mod error;
+pub mod gate;
 pub mod ipc;
 pub mod llm;
 pub mod tools;
