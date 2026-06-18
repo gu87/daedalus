@@ -68,7 +68,10 @@ async fn fake_broker_ignores_req_id() {
         delay: None,
     };
     let tc = make_tool_call("bash");
-    let result = broker.request_permission("claude", "", &tc, "test-task").await.unwrap();
+    let result = broker
+        .request_permission("claude", "", &tc, "test-task")
+        .await
+        .unwrap();
     assert_eq!(result, PermissionDecision::Approved);
 }
 
@@ -138,8 +141,11 @@ async fn ipc_broker_denied_via_response() {
     let broker = IpcPermissionBroker::new(Arc::clone(&state), tx, Duration::from_secs(30));
     let tc = make_tool_call("bash");
 
-    let handle =
-        tokio::spawn(async move { broker.request_permission("claude", "req-denied", &tc, "test-task").await });
+    let handle = tokio::spawn(async move {
+        broker
+            .request_permission("claude", "req-denied", &tc, "test-task")
+            .await
+    });
 
     let msg = rx
         .recv()
@@ -186,8 +192,11 @@ async fn ipc_broker_drain_pending_returns_cancelled() {
     let tc = make_tool_call("bash");
 
     // Spawn broker — it sends permission.request and waits.
-    let handle =
-        tokio::spawn(async move { broker.request_permission("claude", "req-drain", &tc, "test-task").await });
+    let handle = tokio::spawn(async move {
+        broker
+            .request_permission("claude", "req-drain", &tc, "test-task")
+            .await
+    });
 
     // Give the broker time to send the request and enter wait.
     tokio::time::sleep(Duration::from_millis(50)).await;

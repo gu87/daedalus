@@ -57,9 +57,10 @@ pub async fn route(
                 }
                 Message::SessionRejoin(ref sr) => {
                     // P5.2: query ledger and replay missed events.
-                    let after_seq: Option<u32> = sr.last_event_id.as_ref().and_then(|eid| {
-                        eid.rsplit(':').next().and_then(|s| s.parse::<u32>().ok())
-                    });
+                    let after_seq: Option<u32> = sr
+                        .last_event_id
+                        .as_ref()
+                        .and_then(|eid| eid.rsplit(':').next().and_then(|s| s.parse::<u32>().ok()));
 
                     // If last_event_id was provided but invalid, report error.
                     if sr.last_event_id.is_some() && after_seq.is_none() {
@@ -86,8 +87,8 @@ pub async fn route(
                                     )
                                 })?;
                             for stored in &events {
-                                let msg = protocol::parse_message(&stored.payload_json)
-                                    .map_err(|e| {
+                                let msg =
+                                    protocol::parse_message(&stored.payload_json).map_err(|e| {
                                         protocol::make_error(
                                             SystemErrorCode::InvalidMessage,
                                             Some(sr.req_id.clone()),

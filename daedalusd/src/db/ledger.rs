@@ -138,11 +138,7 @@ impl Ledger {
     }
 
     /// Mark an event as acknowledged.  Returns `true` if the event existed.
-    pub async fn mark_acked(
-        &self,
-        event_id: &str,
-        acked_at: i64,
-    ) -> Result<bool, DaedalusError> {
+    pub async fn mark_acked(&self, event_id: &str, acked_at: i64) -> Result<bool, DaedalusError> {
         let db_path = self.db_path.clone();
         let eid = event_id.to_string();
 

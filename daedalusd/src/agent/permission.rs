@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use tokio::select;
 use tokio::sync::mpsc;
 
-use crate::error::AgentError;
 use crate::db::ledger::Ledger;
+use crate::error::AgentError;
 use crate::error::ErrorKind;
 use crate::ipc::session::SessionState;
 use crate::types::{Message, PermissionDecision, PermissionRequest, ToolCall};

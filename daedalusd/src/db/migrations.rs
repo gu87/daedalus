@@ -169,6 +169,9 @@ NOT VALID SQL AT ALL;
         let v: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 2, "real migration must succeed after bogus rollback (v1+v2)");
+        assert_eq!(
+            v, 2,
+            "real migration must succeed after bogus rollback (v1+v2)"
+        );
     }
 }

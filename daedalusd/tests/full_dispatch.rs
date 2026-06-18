@@ -213,7 +213,9 @@ async fn start_server(
             daedalusd::gate::CriteriaRegistry::defaults(),
             5,
         )),
-        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new(
+            "/dev/null",
+        ))),
     });
 
     let listener = UnixListener::bind(&socket_path).unwrap();

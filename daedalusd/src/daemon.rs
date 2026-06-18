@@ -290,18 +290,32 @@ impl DaemonContext {
                                     match factory.build(target_agent_id.clone(), broker, cancel) {
                                         Ok(al) => al,
                                         Err(e) => {
-                                            let msg = Message::TaskError(TaskError {
-                                                ts: protocol::now_utc(),
-                                                event_id: event_id.clone(),
-                                                req_id: req_id.clone(),
-                                                agent_id: target_agent_id.clone(),
-                                                task_id: task_id.clone(),
-                                                error_taxonomy: ErrorCode::Unknown.as_str().into(),
-                                                detail: format!(
-                                                    "failed to build switch AgentLoop: {e}"
-                                                ),
-                                            });
-                                            let _ = writer_tx2.send(msg).await;
+                                            let tid = task_id.clone();
+                                            let tid_r = tid.clone();
+                                            let aid = target_agent_id.clone();
+                                            let rid = req_id.clone();
+                                            let detail =
+                                                format!("failed to build switch AgentLoop: {e}");
+                                            let _ = crate::ipc::reliable::send_reliable_event(
+                                                &writer_tx2,
+                                                &ledger,
+                                                &tid.clone(),
+                                                "task.error",
+                                                move |event_id| {
+                                                    Message::TaskError(TaskError {
+                                                        ts: protocol::now_utc(),
+                                                        event_id: Some(event_id),
+                                                        req_id: rid,
+                                                        agent_id: aid,
+                                                        task_id: tid,
+                                                        error_taxonomy: ErrorCode::Unknown
+                                                            .as_str()
+                                                            .into(),
+                                                        detail,
+                                                    })
+                                                },
+                                            )
+                                            .await;
                                             break;
                                         }
                                     };
@@ -340,32 +354,53 @@ impl DaemonContext {
                                 match insert_result {
                                     Ok(Ok(())) => {}
                                     Ok(Err(e)) => {
-                                        let msg = Message::TaskError(TaskError {
-                                            ts: protocol::now_utc(),
-                                            event_id: event_id.clone(),
-                                            req_id: req_id.clone(),
-                                            agent_id: target_agent_id.clone(),
-                                            task_id: task_id.clone(),
-                                            error_taxonomy: ErrorCode::Unknown.as_str().into(),
-                                            detail: format!(
-                                                "failed to insert switch agent_runs row: {e}"
-                                            ),
-                                        });
-                                        let _ = writer_tx2.send(msg).await;
+                                        let tid = task_id.clone();
+                                        let tid_r = tid.clone();
+                                        let aid = target_agent_id.clone();
+                                        let rid = req_id.clone();
+                                        let detail =
+                                            format!("failed to insert switch agent_runs row: {e}");
+                                        let _ = crate::ipc::reliable::send_reliable_event(
+                                            &writer_tx2,
+                                            &ledger,
+                                            &tid.clone(),
+                                            "task.error",
+                                            move |event_id| {
+                                                Message::TaskError(TaskError {
+                                                    ts: protocol::now_utc(),
+                                                    event_id: Some(event_id),
+                                                    req_id: rid,
+                                                    agent_id: aid,
+                                                    task_id: tid.clone(),
+                                                    error_taxonomy: ErrorCode::Unknown
+                                                        .as_str()
+                                                        .into(),
+                                                    detail,
+                                                })
+                                            },
+                                        )
+                                        .await;
                                         break;
                                     }
                                     Err(_) => {
-                                        let msg = Message::TaskError(TaskError {
-                                            ts: protocol::now_utc(),
-                                            event_id: event_id.clone(),
-                                            req_id: req_id.clone(),
-                                            agent_id: target_agent_id.clone(),
-                                            task_id: task_id.clone(),
-                                            error_taxonomy: ErrorCode::Unknown.as_str().into(),
-                                            detail: "spawn_blocking panic during switch insert_run"
-                                                .into(),
-                                        });
-                                        let _ = writer_tx2.send(msg).await;
+                                        let tid = task_id.clone();
+                                        let tid_r = tid.clone();
+                                        let aid = target_agent_id.clone();
+                                        let rid = req_id.clone();
+                                        let _ = crate::ipc::reliable::send_reliable_event(
+                                            &writer_tx2, &ledger, &tid.clone(), "task.error",
+                                            move |event_id| {
+                                                Message::TaskError(TaskError {
+                                                    ts: protocol::now_utc(),
+                                                    event_id: Some(event_id),
+                                                    req_id: rid,
+                                                    agent_id: aid,
+                                                    task_id: tid.clone(),
+                                                    error_taxonomy: ErrorCode::Unknown.as_str().into(),
+                                                    detail: "spawn_blocking panic during switch insert_run".into(),
+                                                })
+                                            },
+                                        ).await;
                                         break;
                                     }
                                 }
@@ -407,18 +442,32 @@ impl DaemonContext {
                                     match factory.build(current_agent_id.clone(), broker, cancel) {
                                         Ok(al) => al,
                                         Err(e) => {
-                                            let msg = Message::TaskError(TaskError {
-                                                ts: protocol::now_utc(),
-                                                event_id: event_id.clone(),
-                                                req_id: req_id.clone(),
-                                                agent_id: current_agent_id.clone(),
-                                                task_id: task_id.clone(),
-                                                error_taxonomy: ErrorCode::Unknown.as_str().into(),
-                                                detail: format!(
-                                                    "failed to build retry AgentLoop: {e}"
-                                                ),
-                                            });
-                                            let _ = writer_tx2.send(msg).await;
+                                            let tid = task_id.clone();
+                                            let tid_r = tid.clone();
+                                            let aid = current_agent_id.clone();
+                                            let rid = req_id.clone();
+                                            let detail =
+                                                format!("failed to build retry AgentLoop: {e}");
+                                            let _ = crate::ipc::reliable::send_reliable_event(
+                                                &writer_tx2,
+                                                &ledger,
+                                                &tid.clone(),
+                                                "task.error",
+                                                move |event_id| {
+                                                    Message::TaskError(TaskError {
+                                                        ts: protocol::now_utc(),
+                                                        event_id: Some(event_id),
+                                                        req_id: rid,
+                                                        agent_id: aid,
+                                                        task_id: tid,
+                                                        error_taxonomy: ErrorCode::Unknown
+                                                            .as_str()
+                                                            .into(),
+                                                        detail,
+                                                    })
+                                                },
+                                            )
+                                            .await;
                                             break;
                                         }
                                     };
@@ -457,32 +506,53 @@ impl DaemonContext {
                                 match insert_result {
                                     Ok(Ok(())) => {}
                                     Ok(Err(e)) => {
-                                        let msg = Message::TaskError(TaskError {
-                                            ts: protocol::now_utc(),
-                                            event_id: event_id.clone(),
-                                            req_id: req_id.clone(),
-                                            agent_id: current_agent_id.clone(),
-                                            task_id: task_id.clone(),
-                                            error_taxonomy: ErrorCode::Unknown.as_str().into(),
-                                            detail: format!(
-                                                "failed to insert retry agent_runs row: {e}"
-                                            ),
-                                        });
-                                        let _ = writer_tx2.send(msg).await;
+                                        let tid = task_id.clone();
+                                        let tid_r = tid.clone();
+                                        let aid = current_agent_id.clone();
+                                        let rid = req_id.clone();
+                                        let detail =
+                                            format!("failed to insert retry agent_runs row: {e}");
+                                        let _ = crate::ipc::reliable::send_reliable_event(
+                                            &writer_tx2,
+                                            &ledger,
+                                            &tid.clone(),
+                                            "task.error",
+                                            move |event_id| {
+                                                Message::TaskError(TaskError {
+                                                    ts: protocol::now_utc(),
+                                                    event_id: Some(event_id),
+                                                    req_id: rid,
+                                                    agent_id: aid,
+                                                    task_id: tid.clone(),
+                                                    error_taxonomy: ErrorCode::Unknown
+                                                        .as_str()
+                                                        .into(),
+                                                    detail,
+                                                })
+                                            },
+                                        )
+                                        .await;
                                         break;
                                     }
                                     Err(_) => {
-                                        let msg = Message::TaskError(TaskError {
-                                            ts: protocol::now_utc(),
-                                            event_id: event_id.clone(),
-                                            req_id: req_id.clone(),
-                                            agent_id: current_agent_id.clone(),
-                                            task_id: task_id.clone(),
-                                            error_taxonomy: ErrorCode::Unknown.as_str().into(),
-                                            detail: "spawn_blocking panic during retry insert_run"
-                                                .into(),
-                                        });
-                                        let _ = writer_tx2.send(msg).await;
+                                        let tid = task_id.clone();
+                                        let tid_r = tid.clone();
+                                        let aid = current_agent_id.clone();
+                                        let rid = req_id.clone();
+                                        let _ = crate::ipc::reliable::send_reliable_event(
+                                            &writer_tx2, &ledger, &tid.clone(), "task.error",
+                                            move |event_id| {
+                                                Message::TaskError(TaskError {
+                                                    ts: protocol::now_utc(),
+                                                    event_id: Some(event_id),
+                                                    req_id: rid,
+                                                    agent_id: aid,
+                                                    task_id: tid.clone(),
+                                                    error_taxonomy: ErrorCode::Unknown.as_str().into(),
+                                                    detail: "spawn_blocking panic during retry insert_run".into(),
+                                                })
+                                            },
+                                        ).await;
                                         break;
                                     }
                                 }
