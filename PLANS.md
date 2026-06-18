@@ -1568,7 +1568,7 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
                     │
                     └─→ P4.5  模型连通性探测 API [DONE] (af9074b, fixup c03947a)
                           │
-                          └─→ P4.6  Phase 4 验收收口
+                          └─→ P4.6  Phase 4 验收收口 [DONE] (5a82554, fixup a877ac7)
 ```
 
 ## P4.1 HTTP API 骨架 + 健康检查 [DONE]
@@ -1686,3 +1686,31 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
   证明 Router 正确将本地 id 映射为上游 model_id
 
 **不做**：批量验证、定时探测、结果持久化、Router/AgentLoop/daemon 修改
+
+## P4.6 Phase 4 验收收口 [DONE]
+
+> commits: 5a82554, fixup: a877ac7
+
+**目标**：全链路验收 + README 更新 + smoke 脚本 + 范围审计。
+
+**最终能力**：
+- `GET /api/health` — daemon 健康检查
+- `GET /api/tasks` — 任务列表（过滤 + 分页）
+- `GET /api/tasks/:run_id` — 任务详情
+- `GET /api/config/models` — 模型摘要（无敏感字段）
+- `POST /api/models/validate` — 模型连通性探测（Router 生产路径）
+- `daedalus-desktop/` — Electron React UI Skeleton（mock 数据）
+- `scripts/smoke-phase4.sh` — 全链路验收（Python mock + curl）
+
+**最终验证**：
+- `cargo fmt --all -- --check` ✅
+- `cargo test --workspace` ✅ 415 passed, 0 failed, 1 skipped
+- `cargo clippy --workspace -- -D warnings` ✅
+- `scripts/smoke-phase4.sh` ✅ ALL PASSED
+- `cd daedalus-desktop && npm run build` ✅
+
+**返修点**（a877ac7）：
+- smoke 动态端口（python3 socket bind(0)），避免固定端口冲突
+- PID 初始化 + cleanup `-n` guard，`set -u` 安全
+
+**不做**：Router 热替换、notify watcher、IPC/schema/Gate 修改、认证/HTTPS、凭证热刷新、Gemini/Cohere、daedalus-desktop 真实 IPC、system.ack/pipeline/Omega
