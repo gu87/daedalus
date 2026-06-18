@@ -1,91 +1,56 @@
-# P4.1 实现完成报告：HTTP API 骨架 + 健康检查
+# P4.1 Codex 返修：HTTP handle + readonly DB
 
-> Phase 4 起点。daedalusd 新增 axum HTTP server，与 UDS server 并行运行。
-> 暴露 `GET /api/health` 端点。仅本地 loopback。
-
----
-
-## 1. 修改文件清单（8 个）
-
-| 文件 | 操作 | 变更摘要 |
-|------|:---:|------|
-| `daedalusd/Cargo.toml` | 修改 | + `axum = "0.7"`，tokio + `net` feature |
-| `daedalusd/src/config.rs` | 修改 | DaedalusConfig + `http_addr: String`；+ `validate_http_addr()`（拒绝非 loopback）；5 个单元测试 |
-| `daedalusd/src/http/mod.rs` | **新增** | HTTP 子模块声明（health + server） |
-| `daedalusd/src/http/health.rs` | **新增** | `HttpState` + `GET /api/health` handler（status/uptime/socket_path/db_ok） |
-| `daedalusd/src/http/server.rs` | **新增** | `run_http(listener: TcpListener, state, shutdown)` — axum Router + graceful shutdown |
-| `daedalusd/src/main.rs` | 修改 | 验证 http_addr loopback → bind TCP → spawn HTTP server → 与 UDS 并行；shutdown 传播 |
-| `daedalusd/src/lib.rs` | 修改 | + `pub mod http` |
-| `daedalusd/tests/http_health.rs` | **新增** | 3 个集成测试（health ok / db not ok / graceful shutdown） |
-
-**未改文件**：`gate.rs`、`error.rs`、`agent/loop.rs`、`agent/state.rs`、`ipc/*`、`db/*`、`types.rs`
+> P4.1 主实现（commit `5112720`）已通过。此返修修复两个问题。
 
 ---
 
-## 2. 核心行为
+## 返修项
 
-### 2.1 HttpState — 轻量独立状态
+### Fix 1: main.rs — 等待 HTTP task 完成
 
-```rust
-pub struct HttpState {
-    pub ctx: Arc<DaemonContext>,   // 只读引用，不修改
-    pub started_at: Instant,
-    pub socket_path: String,
-    pub db_path: PathBuf,
-}
-```
+**问题**：HTTP server `tokio::spawn` 后未保存 handle。SIGINT/SIGTERM 后 UDS 返回，main 结束直接 drop runtime，HTTP 可能没完成 graceful shutdown。
 
-不修改 DaemonContext，不重构 daemon 核心结构。
+**修复**：
+- 保存 `http_handle`
+- UDS server 返回后调用 `shutdown_token.cancel()`
+- `tokio::time::timeout(Duration::from_secs(3), http_handle).await`
+- Join error → `eprintln`，不覆盖 UDS 的业务返回
+- UDS error 路径同样先 cancel + 等待 HTTP，再 exit(1)
 
-### 2.2 Loopback 强制
+### Fix 2: health.rs — 只读 DB 检查，不创建新文件
 
-- 默认 `127.0.0.1:9800`
-- 环境变量 `DAEDALUSD_HTTP_ADDR`
-- 拒绝 `0.0.0.0`、公网 IP、空 host
-- `localhost`、`127.0.0.1`、`[::1]` 允许
-- 非法地址 → daemon 启动失败 exit(1)
+**问题**：`pool::open()` 使用 rusqlite bundled feature 会自动创建缺失的 SQLite 文件，导致 `db_ok` 误报 true 且凭空创建空 DB。
 
-### 2.3 /api/health 响应
-
-```json
-{ "status": "ok", "uptime_seconds": 42, "socket_path": "/tmp/daedalusd.sock", "db_ok": true }
-```
-
-### 2.4 Shutdown 传播
-
-HTTP server + UDS server + orphan scanner 共享同一个 `CancellationToken`。SIGTERM/SIGINT → token.cancel() → 全部退出。
+**修复**：
+- 改用 `rusqlite::Connection::open_with_flags(path, SQLITE_OPEN_READ_ONLY)`
+- 打开成功后验证 schema：`SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'`
+- 目录存在但 DB 文件不存在 → 返回 false，**不创建 DB 文件**
+- 新增测试 `health_db_file_missing_dir_exists` 断言文件未被创建
 
 ---
 
-## 3. 验证结果
+## 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `daedalusd/src/main.rs` | tokio::spawn → 保存 http_handle；UDS 返回后 cancel + timeout await HTTP |
+| `daedalusd/src/http/health.rs` | pool::open → Connection::open_with_flags(READ_ONLY) + schema 验证；去除 db::pool 依赖 |
+| `daedalusd/tests/http_health.rs` | + health_db_file_missing_dir_exists（4 个测试） |
+
+---
+
+## 验证
 
 ```
-cargo fmt --all -- --check               ✅ 通过
-cargo test --workspace                   ✅ 393 passed, 0 failed
+cargo fmt --all -- --check               ✅
+cargo test --test http_health            ✅ 4 passed
+cargo test --workspace                   ✅ 394 passed, 0 failed
   -- --skip long_line_returns_error_and_closes
-cargo clippy --workspace -- -D warnings  ✅ 通过
+cargo clippy --workspace -- -D warnings  ✅
 ```
-
-### 测试分布
-
-| 测试套 | passed | 变化 |
-|--------|-------:|:---:|
-| lib unit | 224 | +5 config + gate 单元测试不变 |
-| agent_loop | 20 | — |
-| db_registry | 23 | — |
-| error_code | 10 | — |
-| full_dispatch | 5 | — |
-| gate_daemon | 23 | — |
-| http_health | **3** | **新增** |
-| permission | 13 | — |
-| prompt | 35 | — |
-| protocol | 6 | — |
-| provider | 26 | — |
-| tool_registry | 5 | — |
-| **合计** | **393** | **+8** |
 
 ---
 
-## 4. 返回 Codex 复审
+## 返回 Codex 复审
 
-P4.1 实现完毕，393 测试全过。请 Codex 审查。
+返修完毕。请 Codex 审查确认。

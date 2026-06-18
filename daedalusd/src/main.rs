@@ -126,7 +126,7 @@ async fn main() {
         db_path: db_path.clone(),
     });
     let http_shutdown = shutdown_token.clone();
-    tokio::spawn(async move {
+    let http_handle = tokio::spawn(async move {
         daedalusd::http::server::run_http(listener, http_state, http_shutdown).await;
     });
 
@@ -154,8 +154,24 @@ async fn main() {
     });
 
     // ── UDS server (blocking) ──────────────────────────────────────
-    let uds_shutdown = shutdown_token.cancelled();
-    match daedalusd::ipc::server::run_with_context(&socket_path, uds_shutdown, ctx).await {
+    let uds_result =
+        daedalusd::ipc::server::run_with_context(&socket_path, shutdown_token.cancelled(), ctx)
+            .await;
+
+    // P4.1: cancel shutdown token so HTTP server sees it too, then
+    // wait for the HTTP task to finish gracefully.
+    shutdown_token.cancel();
+    match tokio::time::timeout(Duration::from_secs(3), http_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(join_err)) => {
+            eprintln!("daedalusd http: join error: {join_err}");
+        }
+        Err(_) => {
+            eprintln!("daedalusd http: shutdown timed out after 3s");
+        }
+    }
+
+    match uds_result {
         Ok(()) => eprintln!("daedalusd shut down cleanly"),
         Err(e) => {
             eprintln!("daedalusd fatal: {}", e);

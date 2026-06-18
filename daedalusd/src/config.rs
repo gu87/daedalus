@@ -171,7 +171,10 @@ impl DaedalusConfig {
             }
         } else {
             // Plain host:port or just host.
-            self.http_addr.rsplit(':').next_back().unwrap_or(&self.http_addr)
+            self.http_addr
+                .rsplit(':')
+                .next_back()
+                .unwrap_or(&self.http_addr)
         };
 
         match host {

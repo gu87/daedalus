@@ -11,7 +11,6 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::daemon::DaemonContext;
-use crate::db::pool;
 
 // ── HttpState ─────────────────────────────────────────────────────────
 
@@ -40,8 +39,8 @@ pub(crate) async fn health(
 ) -> (StatusCode, Json<HealthResponse>) {
     let uptime = state.started_at.elapsed().as_secs();
 
-    // Quick SQLite connectivity check — opening the file is enough.
-    let db_ok = pool::open(&state.db_path).is_ok();
+    // Read-only SQLite check — does NOT create a missing file.
+    let db_ok = check_db_readonly(&state.db_path);
 
     let body = HealthResponse {
         status: "ok",
@@ -51,4 +50,28 @@ pub(crate) async fn health(
     };
 
     (StatusCode::OK, Json(body))
+}
+
+// ── helpers ───────────────────────────────────────────────────────────
+
+/// Open the database read-only and verify it has our schema.
+///
+/// Uses `SQLITE_OPEN_READ_ONLY` so a missing file stays missing —
+/// no silent creation of an empty database.
+fn check_db_readonly(path: &std::path::Path) -> bool {
+    let conn = match rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    // Verify our schema exists.
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
