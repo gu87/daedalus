@@ -15,6 +15,7 @@ use tokio::net::UnixListener;
 
 use crate::daemon::DaemonContext;
 use crate::error::DaedalusError;
+use crate::gate::{CriteriaRegistry, GateRouter};
 use crate::ipc::peer;
 use crate::ipc::session::Session;
 
@@ -33,6 +34,7 @@ pub async fn run(
         factory: Arc::new(crate::daemon::DefaultAgentLoopFactory {
             config: crate::config::DaedalusConfig::load(),
         }),
+        gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
     });
     run_inner(socket_path, shutdown, ctx).await
 }
@@ -374,6 +376,7 @@ mod tests {
             factory: Arc::new(crate::daemon::DefaultAgentLoopFactory {
                 config: crate::config::DaedalusConfig::load(),
             }),
+            gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
         });
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();

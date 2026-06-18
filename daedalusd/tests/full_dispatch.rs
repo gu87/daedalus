@@ -185,6 +185,7 @@ fn setup_config(dir: &tempfile::TempDir) -> DaedalusConfig {
         skills_dir: format!("{base}/skills"),
         models_yaml_path: format!("{base}/models.yaml"),
         db_path: None,
+        gate_criteria_path: format!("{base}/gate-criteria.yaml"),
     }
 }
 
@@ -206,6 +207,10 @@ async fn start_server(
         config: config.clone(),
         db_path,
         factory,
+        gate_router: Arc::new(daedalusd::gate::GateRouter::new(
+            daedalusd::gate::CriteriaRegistry::defaults(),
+            5,
+        )),
     });
 
     let listener = UnixListener::bind(&socket_path).unwrap();

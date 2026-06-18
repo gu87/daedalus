@@ -394,6 +394,7 @@ fn setup_full_chain(dir: &tempfile::TempDir) -> (PromptBuilder, String) {
         skills_dir: skills_dir.to_string_lossy().to_string(),
         models_yaml_path: format!("{base}/models.yaml"),
         db_path: None,
+        gate_criteria_path: format!("{base}/gate-criteria.yaml"),
     };
 
     // Build PromptBuilder with a custom provider chain that uses MemoryPaths::with_home
@@ -615,6 +616,7 @@ fn prompt_builder_new_db_path_some_injects_history() {
         skills_dir: skills_dir.to_string_lossy().to_string(),
         models_yaml_path: format!("{base}/models.yaml"),
         db_path: Some(db_path),
+        gate_criteria_path: format!("{base}/gate-criteria.yaml"),
     };
     let pb = PromptBuilder::new(cfg);
     let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
@@ -660,6 +662,7 @@ fn prompt_builder_new_history_between_agent_and_skills() {
         skills_dir: skills_dir.to_string_lossy().to_string(),
         models_yaml_path: format!("{base}/models.yaml"),
         db_path: Some(db_path),
+        gate_criteria_path: format!("{base}/gate-criteria.yaml"),
     };
     let pb = PromptBuilder::new(cfg);
     let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();

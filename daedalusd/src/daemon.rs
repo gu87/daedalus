@@ -1,6 +1,7 @@
 //! Daemon wiring — shared context, AgentLoop factory, and task dispatch.
 //!
 //! P2.7: bridges IPC Session (P2.5) and Agent Loop lifecycle (P2.6).
+//! P3.4: GateRouter integration + AutoRevision retry loop.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,7 @@ use crate::agent::r#loop::{AgentLoop, LifecycleContext};
 use crate::config::DaedalusConfig;
 use crate::db::{pool, registry};
 use crate::error::DaedalusError;
+use crate::gate::{GateAction, GateContext, GateRouter};
 use crate::ipc::protocol;
 use crate::ipc::session::SessionState;
 use crate::tools::registry::ToolRegistry;
@@ -78,6 +80,8 @@ pub struct DaemonContext {
     pub config: DaedalusConfig,
     pub db_path: std::path::PathBuf,
     pub factory: Arc<dyn AgentLoopFactory>,
+    /// P3.4: Gate router used to decide retry / switch / hard-stop on error.
+    pub gate_router: Arc<GateRouter>,
 }
 
 impl DaemonContext {
@@ -85,11 +89,12 @@ impl DaemonContext {
     ///
     /// Flow: clone td fields → generate run_id → build IpcPermissionBroker
     /// → factory.build() → (if build fails, return system.error — no DB row)
-    /// → insert_run(status=queued) → tokio::spawn run_with_lifecycle.
+    /// → insert_run(status=queued) → tokio::spawn with Gate retry loop.
     ///
-    /// Returns `Some(system.error)` on immediate failure.  Returns `None`
-    /// when the AgentLoop has been successfully spawned — task.done /
-    /// task.error will arrive later via the writer channel.
+    /// Returns `Some(system.error)` on immediate failure (first build or
+    /// first insert).  Returns `None` when the AgentLoop has been
+    /// successfully spawned — task.done / task.error will arrive later via
+    /// the writer channel.
     pub async fn spawn_task(
         self: &Arc<Self>,
         td: &TaskDispatch,
@@ -98,7 +103,7 @@ impl DaemonContext {
     ) -> Option<Message> {
         // ── Pre-clone everything from td (spawn_blocking closures cannot
         //     borrow &TaskDispatch). ──
-        let run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let first_run_id = format!("run-{}", uuid::Uuid::new_v4());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -111,16 +116,16 @@ impl DaemonContext {
 
         // ── 1. Build IpcPermissionBroker ──
         let perm_broker = Arc::new(IpcPermissionBroker::new(
-            session_state,
+            Arc::clone(&session_state),
             writer_tx.clone(),
             PERMISSION_TIMEOUT,
         ));
 
-        // ── 2. Build AgentLoop via factory ──
+        // ── 2. Build AgentLoop via factory (first attempt) ──
         //     Do this BEFORE insert_run: if build fails, we return
         //     system.error without ever creating an agent_runs row.
         let cancel = CancellationToken::new();
-        let mut agent_loop = match self.factory.build(agent_id.clone(), perm_broker, cancel) {
+        let agent_loop = match self.factory.build(agent_id.clone(), perm_broker, cancel) {
             Ok(al) => al,
             Err(e) => {
                 return Some(protocol::make_error(
@@ -133,7 +138,7 @@ impl DaemonContext {
 
         // ── 3. Insert queued row (only after build succeeded) ──
         let db_path_for_insert = self.db_path.clone();
-        let rid_for_insert = run_id.clone();
+        let rid_for_insert = first_run_id.clone();
         let agid_for_insert = agent_id.clone();
         let tid_for_insert = task_id.clone();
         let insert = tokio::task::spawn_blocking(move || {
@@ -171,48 +176,201 @@ impl DaemonContext {
             }
         }
 
-        // ── 4. Spawn agent execution ──
-        let db_path_for_lc = self.db_path.clone();
-        let rid_for_lc = run_id.clone();
+        // ── 4. Spawn agent execution with Gate retry loop (P3.4) ──
+        let db_path = self.db_path.clone();
+        let gate_router = Arc::clone(&self.gate_router);
+        let factory = Arc::clone(&self.factory);
         let writer_tx2 = writer_tx.clone();
 
         tokio::spawn(async move {
-            let lc = LifecycleContext {
-                run_id: rid_for_lc,
-                db_path: db_path_for_lc,
+            let mut retry_count: u32 = 0;
+            let mut prev_run_id = first_run_id.clone();
+            let mut agent_loop = agent_loop;
+            let mut lc = LifecycleContext {
+                run_id: first_run_id,
+                db_path: db_path.clone(),
                 req_id: req_id.clone(),
             };
 
-            // No outer tokio::time::timeout — run_with_lifecycle already has
-            // its own CancellationToken-based deadline.
-            match agent_loop
-                .run_with_lifecycle(lc, task_card, DEFAULT_TASK_TIMEOUT)
-                .await
-            {
-                Ok(outbox) => {
-                    let msg = Message::TaskDone(Box::new(TaskDone {
-                        ts: protocol::now_utc(),
-                        event_id,
-                        req_id,
-                        agent_id,
-                        task_id,
-                        outbox,
-                    }));
-                    let _ = writer_tx2.send(msg).await;
-                }
-                Err(agent_error) => {
-                    let taxonomy =
-                        crate::error::ErrorCode::from_error_kind(&agent_error.reason).as_str();
-                    let msg = Message::TaskError(TaskError {
-                        ts: protocol::now_utc(),
-                        event_id,
-                        req_id,
-                        agent_id,
-                        task_id,
-                        error_taxonomy: taxonomy.into(),
-                        detail: agent_error.detail,
-                    });
-                    let _ = writer_tx2.send(msg).await;
+            loop {
+                match agent_loop
+                    .run_with_lifecycle(lc, task_card.clone(), DEFAULT_TASK_TIMEOUT)
+                    .await
+                {
+                    Ok(outbox) => {
+                        let msg = Message::TaskDone(Box::new(TaskDone {
+                            ts: protocol::now_utc(),
+                            event_id: event_id.clone(),
+                            req_id: req_id.clone(),
+                            agent_id: agent_id.clone(),
+                            task_id: task_id.clone(),
+                            outbox,
+                        }));
+                        let _ = writer_tx2.send(msg).await;
+                        break;
+                    }
+                    Err(agent_error) => {
+                        let ec = crate::error::ErrorCode::from_error_kind(&agent_error.reason);
+                        let ctx = GateContext {
+                            error_code: ec,
+                            agent_id: agent_id.clone(),
+                            task_id: task_id.clone(),
+                            retry_count,
+                        };
+                        match gate_router.route(&ctx) {
+                            GateAction::HardStop => {
+                                let taxonomy =
+                                    crate::error::ErrorCode::from_error_kind(&agent_error.reason)
+                                        .as_str();
+                                let msg = Message::TaskError(TaskError {
+                                    ts: protocol::now_utc(),
+                                    event_id: event_id.clone(),
+                                    req_id: req_id.clone(),
+                                    agent_id: agent_id.clone(),
+                                    task_id: task_id.clone(),
+                                    error_taxonomy: taxonomy.into(),
+                                    detail: agent_error.detail,
+                                });
+                                let _ = writer_tx2.send(msg).await;
+                                break;
+                            }
+                            GateAction::SwitchAgent { .. } => {
+                                eprintln!(
+                                    "daedalusd gate: switch_agent not implemented in P3.4, \
+                                     treating as hard_stop"
+                                );
+                                let taxonomy =
+                                    crate::error::ErrorCode::from_error_kind(&agent_error.reason)
+                                        .as_str();
+                                let msg = Message::TaskError(TaskError {
+                                    ts: protocol::now_utc(),
+                                    event_id: event_id.clone(),
+                                    req_id: req_id.clone(),
+                                    agent_id: agent_id.clone(),
+                                    task_id: task_id.clone(),
+                                    error_taxonomy: taxonomy.into(),
+                                    detail: agent_error.detail,
+                                });
+                                let _ = writer_tx2.send(msg).await;
+                                break;
+                            }
+                            GateAction::AutoRevision => {
+                                retry_count += 1;
+
+                                // New CancellationToken per retry.
+                                let cancel = CancellationToken::new();
+                                // New IpcPermissionBroker per retry.
+                                let broker = Arc::new(IpcPermissionBroker::new(
+                                    Arc::clone(&session_state),
+                                    writer_tx2.clone(),
+                                    PERMISSION_TIMEOUT,
+                                ));
+
+                                // Build-before-insert: if retry build fails,
+                                // send final TaskError, no new DB row.
+                                let mut new_al =
+                                    match factory.build(agent_id.clone(), broker, cancel) {
+                                        Ok(al) => al,
+                                        Err(e) => {
+                                            let msg = Message::TaskError(TaskError {
+                                                ts: protocol::now_utc(),
+                                                event_id: event_id.clone(),
+                                                req_id: req_id.clone(),
+                                                agent_id: agent_id.clone(),
+                                                task_id: task_id.clone(),
+                                                error_taxonomy: crate::error::ErrorCode::Unknown
+                                                    .as_str()
+                                                    .into(),
+                                                detail: format!(
+                                                    "failed to build retry AgentLoop: {e}"
+                                                ),
+                                            });
+                                            let _ = writer_tx2.send(msg).await;
+                                            break;
+                                        }
+                                    };
+
+                                // Insert retry row (parent = previous run).
+                                let new_run_id = format!("run-{}", uuid::Uuid::new_v4());
+                                let prev = prev_run_id.clone();
+                                let depth = retry_count as i64;
+                                let new_rid = new_run_id.clone();
+                                let agid = agent_id.clone();
+                                let tid = task_id.clone();
+                                let dbp = db_path.clone();
+                                let t_now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                let insert_result = tokio::task::spawn_blocking(move || {
+                                    let conn = pool::open(&dbp)?;
+                                    registry::insert_run(
+                                        &conn,
+                                        &registry::NewAgentRun {
+                                            run_id: new_rid,
+                                            agent_id: agid,
+                                            task_id: tid,
+                                            parent_run_id: Some(prev),
+                                            spawn_depth: depth,
+                                            spawned_at: t_now,
+                                            timeout_seconds: Some(
+                                                DEFAULT_TASK_TIMEOUT.as_secs() as i64
+                                            ),
+                                        },
+                                    )
+                                })
+                                .await;
+
+                                match insert_result {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => {
+                                        let msg = Message::TaskError(TaskError {
+                                            ts: protocol::now_utc(),
+                                            event_id: event_id.clone(),
+                                            req_id: req_id.clone(),
+                                            agent_id: agent_id.clone(),
+                                            task_id: task_id.clone(),
+                                            error_taxonomy: crate::error::ErrorCode::Unknown
+                                                .as_str()
+                                                .into(),
+                                            detail: format!(
+                                                "failed to insert retry agent_runs row: {e}"
+                                            ),
+                                        });
+                                        let _ = writer_tx2.send(msg).await;
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        let msg = Message::TaskError(TaskError {
+                                            ts: protocol::now_utc(),
+                                            event_id: event_id.clone(),
+                                            req_id: req_id.clone(),
+                                            agent_id: agent_id.clone(),
+                                            task_id: task_id.clone(),
+                                            error_taxonomy: crate::error::ErrorCode::Unknown
+                                                .as_str()
+                                                .into(),
+                                            detail: "spawn_blocking panic during retry insert_run"
+                                                .into(),
+                                        });
+                                        let _ = writer_tx2.send(msg).await;
+                                        break;
+                                    }
+                                }
+
+                                // Inject feedback + swap state for next loop.
+                                new_al.set_retry_feedback(&agent_error.detail);
+                                prev_run_id = new_run_id.clone();
+                                lc = LifecycleContext {
+                                    run_id: new_run_id,
+                                    db_path: db_path.clone(),
+                                    req_id: req_id.clone(),
+                                };
+                                agent_loop = new_al;
+                                // continue to top of loop
+                            }
+                        }
+                    }
                 }
             }
         });

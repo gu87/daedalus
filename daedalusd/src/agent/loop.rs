@@ -95,6 +95,9 @@ pub struct AgentLoop {
     denied_commands: Vec<String>,
     /// Working directory — defaults to current dir.  Public for tests.
     pub work_dir: std::path::PathBuf,
+    /// P3.4: retry feedback set by daemon before a retry attempt.
+    /// Consumed once in [`LoopState::BuildingPrompt`], after system prompt push.
+    pending_retry_feedback: Option<String>,
 }
 
 impl AgentLoop {
@@ -122,6 +125,7 @@ impl AgentLoop {
             must_keep: vec![],
             denied_commands: vec![],
             work_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            pending_retry_feedback: None,
         }
     }
 
@@ -156,10 +160,21 @@ impl AgentLoop {
             must_keep: vec![],
             denied_commands: vec![],
             work_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            pending_retry_feedback: None,
         })
     }
 
     // ── public API ──────────────────────────────────────────────────
+
+    /// P3.4: set retry feedback for the next run.
+    /// Called by daemon AFTER factory.build() and BEFORE run_with_lifecycle().
+    /// Consumed once in [`LoopState::BuildingPrompt`], after system prompt.
+    pub fn set_retry_feedback(&mut self, detail: &str) {
+        self.pending_retry_feedback = Some(format!(
+            "Previous attempt failed: {detail}\n\
+             Please analyse the failure and try a different approach."
+        ));
+    }
 
     /// Execute a task **without** lifecycle tracking (P2.4 original API).
     ///
@@ -280,6 +295,13 @@ impl AgentLoop {
                                 role: "system".into(),
                                 content: system,
                             });
+                            // P3.4: inject retry feedback AFTER system prompt.
+                            if let Some(feedback) = self.pending_retry_feedback.take() {
+                                self.messages.push(ChatMessage {
+                                    role: "system".into(),
+                                    content: feedback,
+                                });
+                            }
                             LoopState::SendingToLLM {
                                 messages: self.messages.clone(),
                                 tools: self.tool_registry.definitions(),

@@ -127,6 +127,8 @@ pub struct DaedalusConfig {
     pub models_yaml_path: String,
     /// P3.1b: path to daedalusd.sqlite.  None disables AgentHistoryProvider.
     pub db_path: Option<std::path::PathBuf>,
+    /// P3.4: path to gate-criteria.yaml.  File not found → defaults only (silent).
+    pub gate_criteria_path: String,
 }
 
 impl DaedalusConfig {
@@ -142,6 +144,8 @@ impl DaedalusConfig {
                 .unwrap_or_else(|_| format!("{home}/.hermes/skills")),
             models_yaml_path: default_models_yaml_path(),
             db_path: None,
+            gate_criteria_path: std::env::var("DAEDALUS_GATE_CRITERIA_PATH")
+                .unwrap_or_else(|_| format!("{home}/.daedalus/config/gate-criteria.yaml")),
         }
     }
 }

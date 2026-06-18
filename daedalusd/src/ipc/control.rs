@@ -112,9 +112,14 @@ mod tests {
                 skills_dir: "/dev/null".into(),
                 models_yaml_path: "/dev/null".into(),
                 db_path: None,
+                gate_criteria_path: "/dev/null".into(),
             },
             db_path: std::path::PathBuf::from("/dev/null"),
             factory: Arc::new(StubFactory),
+            gate_router: Arc::new(crate::gate::GateRouter::new(
+                crate::gate::CriteriaRegistry::defaults(),
+                5,
+            )),
         })
     }
 
@@ -241,9 +246,14 @@ mod tests {
                 skills_dir: "/dev/null".into(),
                 models_yaml_path: "/dev/null".into(),
                 db_path: None,
+                gate_criteria_path: "/dev/null".into(),
             },
             db_path: std::path::PathBuf::from("/dev/null"),
             factory: Arc::new(ErrFactory),
+            gate_router: Arc::new(crate::gate::GateRouter::new(
+                crate::gate::CriteriaRegistry::defaults(),
+                5,
+            )),
         });
         let state = make_state();
         let (tx, mut rx) = make_writer();

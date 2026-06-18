@@ -5,11 +5,14 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use daedalusd::daemon::{DaemonContext, DefaultAgentLoopFactory};
+use daedalusd::gate::{CriteriaRegistry, GateRouter};
 
 /// Orphan scan runs every 60 s.
 const ORPHAN_SCAN_INTERVAL_SECS: u64 = 60;
 /// Runs whose heartbeat is older than this threshold (90 s) are orphaned.
 const ORPHAN_CUTOFF_SECS: i64 = 90;
+/// P3.4: maximum task retries enforced by GateRouter global cap.
+const MAX_TASK_RETRIES: u32 = 5;
 
 #[tokio::main]
 async fn main() {
@@ -33,13 +36,27 @@ async fn main() {
 
     let db_path = state_dir.join("daedalusd.sqlite");
 
-    // ── daemon context (P2.7) ──────────────────────────────────────
+    // ── daemon config (P2.7 + P3.4 gate) ───────────────────────────
     let mut config = daedalusd::config::DaedalusConfig::load();
     config.db_path = Some(db_path.clone());
+
+    // P3.4: construct GateRouter from gate-criteria.yaml.
+    // File not found → defaults (silent).  YAML parse error / invalid
+    // action → fatal (exit 1).
+    let registry = match CriteriaRegistry::with_overrides(&config.gate_criteria_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("daedalusd fatal: invalid gate criteria config: {e}");
+            std::process::exit(1);
+        }
+    };
+    let gate_router = Arc::new(GateRouter::new(registry, MAX_TASK_RETRIES));
+
     let ctx = Arc::new(DaemonContext {
         config: config.clone(),
         db_path: db_path.clone(),
         factory: Arc::new(DefaultAgentLoopFactory { config }),
+        gate_router,
     });
 
     // ── shared shutdown token ──────────────────────────────────────
