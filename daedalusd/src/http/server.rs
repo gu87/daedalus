@@ -1,11 +1,11 @@
-//! P4.1: axum HTTP server — builds a Router and serves on a TCP listener.
+//! P4.1/P4.5: axum HTTP server — builds a Router and serves on a TCP listener.
 //!
 //! `run_http(listener, state, shutdown)` starts the server and returns when
 //! the shutdown token is cancelled.
 
 use std::sync::Arc;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::config;
 use super::health::{self, HttpState};
 use super::tasks;
+use super::validate;
 
 /// Start the HTTP server on `listener`.
 ///
@@ -26,6 +27,7 @@ pub async fn run_http(listener: TcpListener, state: Arc<HttpState>, shutdown: Ca
         .route("/api/tasks", get(tasks::list_tasks))
         .route("/api/tasks/:run_id", get(tasks::get_task))
         .route("/api/config/models", get(config::list_models))
+        .route("/api/models/validate", post(validate::validate_model))
         .with_state(state);
 
     axum::serve(listener, app)

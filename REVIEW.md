@@ -1,41 +1,39 @@
-# P4.4 实现完成报告：配置诊断 + 模型摘要 API
+# P4.5 实现完成报告：模型连通性探测 API
 
-> 基于 P4.2（commit `60703ce`）。不做 Router 热替换。
-> (1) 证明 `AgentLoop::new()` 每次 build 读最新 models.yaml；
-> (2) 新增 `GET /api/config/models`。
+> 基于 P4.4（commit `168eb23`）。新增 `POST /api/models/validate`。
+> 走 `Router::from_models_config()` + `chat_with_fallback()` 生产路径。
 
 ---
 
-## 1. 修改文件清单（6 个）
+## 1. 修改文件清单（4 个）
 
 | 文件 | 操作 | 变更摘要 |
 |------|:---:|------|
-| `daedalusd/src/http/config.rs` | **新增** | `GET /api/config/models` handler（provider 不存在 → 500，YAML 错误 → 500，文件缺失 → []） |
-| `daedalusd/src/http/mod.rs` | 修改 | + `pub mod config` |
-| `daedalusd/src/http/server.rs` | 修改 | 注册 `/api/config/models` 路由 |
-| `daedalusd/tests/config_reload.rs` | **新增** | 1 个 reload 证明测试（生产路径：AgentLoop::new） |
-| `daedalusd/tests/http_config.rs` | **新增** | 5 个 HTTP 集成测试 |
+| `daedalusd/src/http/validate.rs` | **新增** | `POST /api/models/validate` handler（Router 生产路径 + 10s 超时） |
+| `daedalusd/src/http/mod.rs` | 修改 | + `pub mod validate` |
+| `daedalusd/src/http/server.rs` | 修改 | 注册 `POST /api/models/validate` 路由（`axum::routing::post`） |
+| `daedalusd/tests/http_validate.rs` | **新增** | 5 个 httptest 集成测试 |
 
-**未改**：main.rs、daemon.rs、health.rs、tasks.rs、registry.rs、Router、IPC、schema、Gate
+**未改**：Router、AgentLoop、daemon、config.rs、IPC、schema
 
 ---
 
 ## 2. 核心行为
 
-### 2.1 `/api/config/models`
+```
+POST /api/models/validate  { "model_id": "local-model" }
+  → model_id 为空 → 400
+  → load_models_yaml() → 找 models[].id → 不存在 → 400
+  → ModelStrategy { primary: ModelConfig { model: "local-model", max_tokens: 1 } }
+  → Router::from_models_config() → 缺 API key / 配置错误 → 400
+  → tokio::time::timeout(10s, chat_with_fallback("ping"))
+  → Ok → 200 { reachable: true, latency_ms }
+  → Err(ProviderError) → 200 { reachable: false, error: Display(e) }
+  → Timeout → 200 { reachable: false, error: "timeout after 10s" }
+```
 
-- 文件存在且合法 → 200 + 模型列表（id / provider / type 三个字段）
-- 文件不存在 → 200 + `{ "models": [] }`
-- YAML 语法错误 → 500
-- 模型引用不存在的 provider → 500
-- 绝不返回 `api_key_env` / `base_url` / `model_id`
-
-### 2.2 reload 证明
-
-第一次 `AgentLoop::new()`：models.yaml 指向不存在 provider → Err
-修改 models.yaml 为合法 → 第二次 `AgentLoop::new()` → Ok
-
-证明生产路径（`AgentLoop::new → Router::from_models_config → load_models_yaml`）天然读取最新磁盘文件。
+- model_id 是本地 `models[].id`，非上游 `models[].model_id`
+- ProviderError 用 `Display` 文本，不泄密
 
 ---
 
@@ -43,15 +41,24 @@
 
 ```
 cargo fmt --all -- --check               ✅
-cargo test --test config_reload          ✅ 1 passed
-cargo test --test http_config            ✅ 5 passed
-cargo test --workspace                   ✅ 410 passed
+cargo test --test http_validate          ✅ 5 passed
+cargo test --workspace                   ✅ 415 passed
   -- --skip long_line_returns_error_and_closes
 cargo clippy --workspace -- -D warnings  ✅
 ```
+
+### http_validate 测试（5 个）
+
+| # | 测试 | 断言 |
+|:--|------|------|
+| 1 | validate_reachable | httptest 200 → reachable:true + latency_ms |
+| 2 | validate_unreachable_401 | httptest 401 → reachable:false + error 含 "auth error" |
+| 3 | validate_unknown_model_400 | model_id 不在配置 → 400 |
+| 4 | validate_missing_model_id_400 | 空 body → 400 + "model_id" |
+| 5 | validate_missing_api_key_400 | remove_var → 400 + "missing API key" |
 
 ---
 
 ## 4. 返回 Codex 复审
 
-P4.4 实现完毕。请 Codex 审查。
+P4.5 实现完毕，415 测试全过。请 Codex 审查。
