@@ -1,5 +1,7 @@
 //! P3.1a tests — SourceProvider unit tests and full-chain integration.
 
+use std::sync::Mutex;
+
 use daedalusd::agent::prompt::PromptBuilder;
 use daedalusd::agent::prompt_sources::{
     AgentConfigProvider, AuthorityMapProvider, DaedalusMdProvider, FeedbackProvider, MemoryPaths,
@@ -8,6 +10,36 @@ use daedalusd::agent::prompt_sources::{
 };
 use daedalusd::config::DaedalusConfig;
 use daedalusd::types::{TaskCard, TaskContext};
+
+/// Serialise tests that mutate environment variables.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+struct EnvGuard {
+    saved: Vec<(String, Option<String>)>,
+}
+
+impl EnvGuard {
+    /// Set temporary env vars and return a guard that restores on drop.
+    fn set(vars: &[(&str, &str)]) -> Self {
+        let mut saved = Vec::new();
+        for (k, v) in vars {
+            saved.push((k.to_string(), std::env::var(k).ok()));
+            std::env::set_var(k, v);
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.saved {
+            match v {
+                Some(old) => std::env::set_var(k, old),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
 
 // ── helpers ───────────────────────────────────────────────────────────
 
@@ -692,26 +724,34 @@ fn prompt_builder_new_history_between_agent_and_skills() {
 ///
 /// Uses MemoryPaths::with_home + a manual provider chain so all file
 /// paths are under the temp dir (avoids $HOME env pollution).
+/// Test that the real PromptBuilder::new(config) chain includes
+/// [daedalus] between [soul] and [memory].
+///
+/// Uses env guard to point HOME at a temp dir so MemoryPaths::load()
+/// reads from temp files.  PromptBuilder::new(config) is the production
+/// path — NOT with_providers.
 #[test]
 fn prompt_builder_new_includes_daedalus_between_soul_and_memory() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+
     let dir = tempfile::TempDir::new().unwrap();
     let base = dir.path().to_string_lossy().to_string();
     let home = base.clone();
 
-    // Set up .daedalus/ paths that MemoryPaths::with_home expects.
+    // Set up HOME/.daedalus/... paths that MemoryPaths::load() expects.
     let daedalus_dir = dir.path().join(".daedalus");
     let config_dir = daedalus_dir.join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::create_dir_all(dir.path().join("skills")).unwrap();
 
-    // Required files.
+    // Required files for the real PromptBuilder::new chain.
     std::fs::write(dir.path().join("SOUL.md"), "You are Daedalus.\n").unwrap();
     std::fs::write(
         config_dir.join("managed-agents.yaml"),
         "agents:\n  test-agent:\n    role_summary: Test\n    tools: [task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: test\n      fallback_chain: []\n",
     )
     .unwrap();
-    // Memory Layer files.
+    // Memory Layer files (must exist for [memory] to appear).
     std::fs::write(daedalus_dir.join("MEMORY.md"), "memory\n").unwrap();
     std::fs::write(daedalus_dir.join("USER.md"), "user\n").unwrap();
     std::fs::write(
@@ -733,37 +773,60 @@ fn prompt_builder_new_includes_daedalus_between_soul_and_memory() {
     // DAEDALUS.md.
     std::fs::write(dir.path().join("DAEDALUS.md"), "Project instructions.\n").unwrap();
 
-    let mp = MemoryPaths::with_home(&home);
-    let cfg = DaedalusConfig {
-        soul_path: format!("{base}/SOUL.md"),
-        managed_agents_path: config_dir
-            .join("managed-agents.yaml")
-            .to_string_lossy()
-            .into(),
-        skills_dir: format!("{base}/skills"),
-        models_yaml_path: format!("{base}/models.yaml"),
-        db_path: None,
-        gate_criteria_path: format!("{base}/gate-criteria.yaml"),
-        http_addr: "127.0.0.1:9800".into(),
-        daedalus_md_path: format!("{base}/DAEDALUS.md"),
-    };
+    // Guard: point HOME + all DAEDALUS_* paths at temp dir.
+    // MemoryPaths::load() uses env vars with $HOME/.daedalus/... defaults.
+    let _guard = EnvGuard::set(&[
+        ("HOME", &home),
+        ("DAEDALUS_SOUL_PATH", &format!("{base}/SOUL.md")),
+        (
+            "DAEDALUS_MANAGED_AGENTS_PATH",
+            &config_dir
+                .join("managed-agents.yaml")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        ("DAEDALUS_SKILLS_DIR", &format!("{base}/skills")),
+        ("DAEDALUS_MD_PATH", &format!("{base}/DAEDALUS.md")),
+        (
+            "DAEDALUS_MEMORY_MD_PATH",
+            &daedalus_dir.join("MEMORY.md").to_string_lossy().to_string(),
+        ),
+        (
+            "DAEDALUS_USER_MD_PATH",
+            &daedalus_dir.join("USER.md").to_string_lossy().to_string(),
+        ),
+        (
+            "DAEDALUS_PREFERENCES_PATH",
+            &config_dir
+                .join("user-preferences.json")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        (
+            "DAEDALUS_FEEDBACK_PATH",
+            &config_dir
+                .join("feedback-memory.json")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        (
+            "DAEDALUS_PROJECT_CONTEXT_PATH",
+            &config_dir
+                .join("project-context.json")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        (
+            "DAEDALUS_AUTHORITY_MAP_PATH",
+            &config_dir
+                .join("authority-map")
+                .to_string_lossy()
+                .to_string(),
+        ),
+    ]);
 
-    // Build a provider chain matching PromptBuilder::new order,
-    // but using MemoryPaths::with_home for temp paths.
-    let providers: Vec<Box<dyn SourceProvider>> = vec![
-        Box::new(SoulProvider::new(&cfg.soul_path)),
-        Box::new(DaedalusMdProvider::new(&cfg.daedalus_md_path)),
-        Box::new(MemoryProvider::new(&mp.memory_md)),
-        Box::new(UserProvider::new(&mp.user_md)),
-        Box::new(PreferencesProvider::new(&mp.preferences)),
-        Box::new(AgentConfigProvider::new(&cfg.managed_agents_path)),
-        Box::new(FeedbackProvider::new(&mp.feedback)),
-        Box::new(ProjectContextProvider::new(&mp.project_context)),
-        Box::new(AuthorityMapProvider::new(&mp.authority_map)),
-        Box::new(SkillsProvider::new(&cfg.skills_dir)),
-    ];
-    let pb = PromptBuilder::with_providers(providers, cfg.managed_agents_path);
-
+    let config = DaedalusConfig::load();
+    let pb = PromptBuilder::new(config);
     let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
 
     let soul_pos = prompt.find("[soul]").expect("[soul] not found");
@@ -780,8 +843,6 @@ fn prompt_builder_new_includes_daedalus_between_soul_and_memory() {
     );
 }
 
-/// P5.1: DAEDALUS.md missing → silent skip, no error.
-#[test]
 fn daedalus_md_missing_silent_skip() {
     let dir = tempfile::TempDir::new().unwrap();
     let base = dir.path().to_string_lossy().to_string();

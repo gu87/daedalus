@@ -195,7 +195,12 @@ impl DaedalusConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// Protect env-mutating tests from racing.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn validate_loopback_ok() {
@@ -252,6 +257,20 @@ mod tests {
             gate_criteria_path: "/tmp/gate.yaml".into(),
             http_addr: "127.0.0.1:9800".into(),
             daedalus_md_path: "DAEDALUS.md".into(),
+        }
+    }
+
+    #[test]
+    fn load_uses_daedalus_md_path_env_override() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = std::env::var("DAEDALUS_MD_PATH").ok();
+        std::env::set_var("DAEDALUS_MD_PATH", "/tmp/custom-daedalus.md");
+        let config = DaedalusConfig::load();
+        assert_eq!(config.daedalus_md_path, "/tmp/custom-daedalus.md");
+        // Restore.
+        match saved {
+            Some(v) => std::env::set_var("DAEDALUS_MD_PATH", v),
+            None => std::env::remove_var("DAEDALUS_MD_PATH"),
         }
     }
 }

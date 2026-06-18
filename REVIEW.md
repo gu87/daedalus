@@ -16,7 +16,7 @@
 | `daedalusd/tests/prompt.rs` | 修改 | +3 测试：链顺序、缺失 skip、自定义路径；+ 手动链补 DaedalusMdProvider |
 | 10 个测试文件 | 修改 | DaedalusConfig struct literal 补齐 `daedalus_md_path` |
 
-**未改**：IPC、schema、Gate、Agent Loop、daemon、HTTP
+**未改**：IPC 行为/协议、schema、Gate、Agent Loop、daemon、HTTP（`ipc/control.rs` 仅为 DaedalusConfig struct literal 补字段，无 IPC 行为变化）
 
 ---
 
