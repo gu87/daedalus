@@ -56,7 +56,7 @@ impl PermissionBroker for FakePermissionBroker {
         _agent_id: &str,
         _req_id: &str,
         _tool_call: &ToolCall,
-        task_id: &str,
+        _task_id: &str,
     ) -> Result<PermissionDecision, AgentError> {
         if let Some(d) = self.delay {
             tokio::time::sleep(d).await;

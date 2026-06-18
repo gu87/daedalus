@@ -645,3 +645,124 @@ async fn permission_request_uses_reliable_event() {
     assert_eq!(events[0].message_type, "permission.request");
     assert!(events[0].payload_json.contains("task-perm:0"));
 }
+
+#[tokio::test]
+async fn session_rejoin_rejects_mismatched_task_id() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    {
+        let mut c = pool::open(&db_path).unwrap();
+        migrations::run_all(&mut c).unwrap();
+    }
+    let ctx = make_route_ctx(&db_path);
+    let state = Arc::new(SessionState::new());
+    let (tx, mut rx) = mpsc::channel::<Message>(8);
+
+    let rejoin = serde_json::json!({
+        "type": "session.rejoin", "ts": "2026-01-01T00:00:00Z",
+        "req_id": "rj-1", "task_id": "tA", "last_event_id": "tB:0"
+    })
+    .to_string();
+    control::route(&ctx, &state, &rejoin, &tx).await;
+    let resp = rx.try_recv().expect("should get error");
+    match resp {
+        Message::SystemError(e) => {
+            assert!(e.detail.contains("does not match task_id"));
+        }
+        other => panic!("expected SystemError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn session_rejoin_rejects_malformed_last_event_id() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    {
+        let mut c = pool::open(&db_path).unwrap();
+        migrations::run_all(&mut c).unwrap();
+    }
+    let ctx = make_route_ctx(&db_path);
+    let state = Arc::new(SessionState::new());
+    let (tx, mut rx) = mpsc::channel::<Message>(8);
+
+    let rejoin = serde_json::json!({
+        "type": "session.rejoin", "ts": "2026-01-01T00:00:00Z",
+        "req_id": "rj-2", "task_id": "t1", "last_event_id": "bad-format"
+    })
+    .to_string();
+    control::route(&ctx, &state, &rejoin, &tx).await;
+    let resp = rx.try_recv().expect("should get error");
+    match resp {
+        Message::SystemError(e) => {
+            assert!(e.detail.contains("event_id missing colon"));
+        }
+        other => panic!("expected SystemError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn system_ack_malformed_event_id_rejected() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    {
+        let mut c = pool::open(&db_path).unwrap();
+        migrations::run_all(&mut c).unwrap();
+    }
+    let ctx = make_route_ctx(&db_path);
+    let state = Arc::new(SessionState::new());
+    let (tx, mut rx) = mpsc::channel::<Message>(8);
+
+    // protocol layer should reject malformed event_id before reaching control
+    let ack = serde_json::json!({
+        "type": "system.ack", "ts": "2026-01-01T00:00:00Z",
+        "event_id": "not-valid", "req_id": "ack-1"
+    })
+    .to_string();
+    control::route(&ctx, &state, &ack, &tx).await;
+    let resp = rx.try_recv().expect("should get error");
+    match resp {
+        Message::SystemError(e) => {
+            assert!(e.detail.contains("event_id missing colon"));
+        }
+        other => panic!("expected SystemError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn append_event_concurrent_same_task_gets_unique_seq() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    {
+        let mut c = pool::open(&db_path).unwrap();
+        migrations::run_all(&mut c).unwrap();
+    }
+    let ledger = Arc::new(Ledger::new(&db_path));
+
+    let mut handles = vec![];
+    for _ in 0..5 {
+        let l = Arc::clone(&ledger);
+        handles.push(tokio::spawn(async move {
+            l.append_event("t-conc", "task.stream", |eid| {
+                Message::TaskStream(daedalusd::types::TaskStream {
+                    ts: "2026-01-01T00:00:00Z".into(),
+                    event_id: Some(eid),
+                    req_id: "r".into(),
+                    agent_id: "a".into(),
+                    task_id: "t-conc".into(),
+                    chunk: "data".into(),
+                })
+            })
+            .await
+            .unwrap()
+        }));
+    }
+    let mut seqs = vec![];
+    for h in handles {
+        let (eid, _) = h.await.unwrap();
+        seqs.push(eid);
+    }
+    seqs.sort();
+    for (i, eid) in seqs.iter().enumerate() {
+        assert_eq!(eid, &format!("t-conc:{i}"));
+    }
+}

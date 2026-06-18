@@ -109,6 +109,23 @@ fn validate_event_id(event_id: Option<&str>) -> Result<(), ProtocolError> {
     }
 }
 
+/// P5.2: parse an event_id of the form "{task_id}:{seq}".
+///
+/// Returns `(task_id, seq)` on success, or an error description on failure.
+pub fn parse_event_id(event_id: &str) -> Result<(&str, u32), String> {
+    let colon = event_id
+        .rfind(':')
+        .ok_or_else(|| format!("event_id missing colon: '{event_id}'"))?;
+    let task_id = &event_id[..colon];
+    if task_id.is_empty() {
+        return Err(format!("event_id has empty task_id: '{event_id}'"));
+    }
+    let seq: u32 = event_id[colon + 1..]
+        .parse()
+        .map_err(|_| format!("event_id has invalid seq: '{event_id}'"))?;
+    Ok((task_id, seq))
+}
+
 /// Extract `req_id` from an already-parsed JSON Value, returning `None`
 /// when the field is absent, not a string, or an empty string.
 fn extract_req_id(value: &Value) -> Option<String> {
@@ -371,6 +388,14 @@ fn validate_message(msg: &Message) -> Result<(), ProtocolError> {
                     code: SystemErrorCode::InvalidMessage,
                     req_id: Some(sa.req_id.clone()),
                     detail: "system.ack: 'event_id' must not be empty".into(),
+                });
+            }
+            // P5.2: validate event_id format {task_id}:{seq}.
+            if let Err(e) = parse_event_id(&sa.event_id) {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(sa.req_id.clone()),
+                    detail: format!("system.ack: {e}"),
                 });
             }
             Ok(())

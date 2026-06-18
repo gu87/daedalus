@@ -291,7 +291,7 @@ impl DaemonContext {
                                         Ok(al) => al,
                                         Err(e) => {
                                             let tid = task_id.clone();
-                                            let tid_r = tid.clone();
+                                            let _tid_r = tid.clone();
                                             let aid = target_agent_id.clone();
                                             let rid = req_id.clone();
                                             let detail =
@@ -355,7 +355,7 @@ impl DaemonContext {
                                     Ok(Ok(())) => {}
                                     Ok(Err(e)) => {
                                         let tid = task_id.clone();
-                                        let tid_r = tid.clone();
+                                        let _tid_r = tid.clone();
                                         let aid = target_agent_id.clone();
                                         let rid = req_id.clone();
                                         let detail =
@@ -384,7 +384,7 @@ impl DaemonContext {
                                     }
                                     Err(_) => {
                                         let tid = task_id.clone();
-                                        let tid_r = tid.clone();
+                                        let _tid_r = tid.clone();
                                         let aid = target_agent_id.clone();
                                         let rid = req_id.clone();
                                         let _ = crate::ipc::reliable::send_reliable_event(
@@ -443,7 +443,7 @@ impl DaemonContext {
                                         Ok(al) => al,
                                         Err(e) => {
                                             let tid = task_id.clone();
-                                            let tid_r = tid.clone();
+                                            let _tid_r = tid.clone();
                                             let aid = current_agent_id.clone();
                                             let rid = req_id.clone();
                                             let detail =
@@ -507,7 +507,7 @@ impl DaemonContext {
                                     Ok(Ok(())) => {}
                                     Ok(Err(e)) => {
                                         let tid = task_id.clone();
-                                        let tid_r = tid.clone();
+                                        let _tid_r = tid.clone();
                                         let aid = current_agent_id.clone();
                                         let rid = req_id.clone();
                                         let detail =
@@ -536,7 +536,7 @@ impl DaemonContext {
                                     }
                                     Err(_) => {
                                         let tid = task_id.clone();
-                                        let tid_r = tid.clone();
+                                        let _tid_r = tid.clone();
                                         let aid = current_agent_id.clone();
                                         let rid = req_id.clone();
                                         let _ = crate::ipc::reliable::send_reliable_event(

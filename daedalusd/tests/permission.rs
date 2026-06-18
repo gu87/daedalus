@@ -18,6 +18,15 @@ fn make_state() -> Arc<SessionState> {
     Arc::new(SessionState::new())
 }
 
+fn make_ledger(dir: &tempfile::TempDir) -> Arc<daedalusd::db::ledger::Ledger> {
+    let db_path = dir.path().join("perm_test.sqlite");
+    {
+        let mut conn = daedalusd::db::pool::open(&db_path).unwrap();
+        daedalusd::db::migrations::run_all(&mut conn).unwrap();
+    }
+    Arc::new(daedalusd::db::ledger::Ledger::new(&db_path))
+}
+
 fn make_tool_call(name: &str) -> ToolCall {
     ToolCall {
         id: format!("tc-{name}"),
@@ -81,7 +90,7 @@ async fn fake_broker_ignores_req_id() {
 async fn ipc_broker_empty_req_id_error() {
     let state = make_state();
     let (tx, _rx) = fake_writer_tx();
-    let broker = IpcPermissionBroker::new(state, tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_secs(30));
+    let broker = IpcPermissionBroker::new(state, tx, make_ledger(&dir), Duration::from_secs(30));
     let tc = make_tool_call("bash");
     let err = broker
         .request_permission("claude", "", &tc, "test-task")
@@ -97,7 +106,12 @@ async fn ipc_broker_empty_req_id_error() {
 async fn ipc_broker_approved_via_response() {
     let state = make_state();
     let (tx, mut rx) = fake_writer_tx();
-    let broker = IpcPermissionBroker::new(Arc::clone(&state), tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_secs(30));
+    let broker = IpcPermissionBroker::new(
+        Arc::clone(&state),
+        tx,
+        make_ledger(&dir),
+        Duration::from_secs(30),
+    );
     let tc = make_tool_call("bash");
 
     // Spawn the broker request — it will block until we send a response.
@@ -138,7 +152,12 @@ async fn ipc_broker_approved_via_response() {
 async fn ipc_broker_denied_via_response() {
     let state = make_state();
     let (tx, mut rx) = fake_writer_tx();
-    let broker = IpcPermissionBroker::new(Arc::clone(&state), tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_secs(30));
+    let broker = IpcPermissionBroker::new(
+        Arc::clone(&state),
+        tx,
+        make_ledger(&dir),
+        Duration::from_secs(30),
+    );
     let tc = make_tool_call("bash");
 
     let handle = tokio::spawn(async move {
@@ -171,7 +190,7 @@ async fn ipc_broker_denied_via_response() {
 async fn ipc_broker_timeout_returns_denied() {
     let state = make_state();
     let (tx, _rx) = fake_writer_tx();
-    let broker = IpcPermissionBroker::new(state, tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_millis(50));
+    let broker = IpcPermissionBroker::new(state, tx, make_ledger(&dir), Duration::from_millis(50));
     let tc = make_tool_call("bash");
 
     let result = broker
@@ -188,7 +207,12 @@ async fn ipc_broker_timeout_returns_denied() {
 async fn ipc_broker_drain_pending_returns_cancelled() {
     let state = make_state();
     let (tx, _rx) = fake_writer_tx();
-    let broker = IpcPermissionBroker::new(Arc::clone(&state), tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_secs(30));
+    let broker = IpcPermissionBroker::new(
+        Arc::clone(&state),
+        tx,
+        make_ledger(&dir),
+        Duration::from_secs(30),
+    );
     let tc = make_tool_call("bash");
 
     // Spawn broker — it sends permission.request and waits.
@@ -220,7 +244,7 @@ async fn ipc_broker_send_failure_returns_cancelled() {
     // Drop rx immediately so send fails.
     drop(rx);
 
-    let broker = IpcPermissionBroker::new(state, tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_secs(30));
+    let broker = IpcPermissionBroker::new(state, tx, make_ledger(&dir), Duration::from_secs(30));
     let tc = make_tool_call("bash");
 
     let err = broker
@@ -239,7 +263,7 @@ async fn ipc_broker_shutdown_returns_cancelled() {
     state.shutdown.cancel(); // shutdown before request
 
     let (tx, _rx) = fake_writer_tx();
-    let broker = IpcPermissionBroker::new(state, tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_secs(30));
+    let broker = IpcPermissionBroker::new(state, tx, make_ledger(&dir), Duration::from_secs(30));
     let tc = make_tool_call("bash");
 
     let err = broker
@@ -255,7 +279,12 @@ async fn ipc_broker_shutdown_returns_cancelled() {
 async fn no_pending_leak_after_response() {
     let state = make_state();
     let (tx, mut rx) = fake_writer_tx();
-    let broker = IpcPermissionBroker::new(Arc::clone(&state), tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_secs(30));
+    let broker = IpcPermissionBroker::new(
+        Arc::clone(&state),
+        tx,
+        make_ledger(&dir),
+        Duration::from_secs(30),
+    );
     let tc = make_tool_call("bash");
 
     let handle = tokio::spawn(async move {
@@ -297,7 +326,12 @@ async fn no_pending_leak_after_response() {
 async fn no_pending_leak_after_timeout() {
     let state = make_state();
     let (tx, _rx) = fake_writer_tx();
-    let broker = IpcPermissionBroker::new(Arc::clone(&state), tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_millis(10));
+    let broker = IpcPermissionBroker::new(
+        Arc::clone(&state),
+        tx,
+        make_ledger(&dir),
+        Duration::from_millis(10),
+    );
     let tc = make_tool_call("bash");
 
     let _ = broker
@@ -315,7 +349,12 @@ async fn no_pending_leak_after_send_failure() {
     let (tx, rx) = fake_writer_tx();
     drop(rx);
 
-    let broker = IpcPermissionBroker::new(Arc::clone(&state), tx, Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))), Duration::from_secs(30));
+    let broker = IpcPermissionBroker::new(
+        Arc::clone(&state),
+        tx,
+        make_ledger(&dir),
+        Duration::from_secs(30),
+    );
     let tc = make_tool_call("bash");
 
     let _ = broker

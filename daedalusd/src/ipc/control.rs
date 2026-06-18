@@ -56,24 +56,38 @@ pub async fn route(
                     }
                 }
                 Message::SessionRejoin(ref sr) => {
-                    // P5.2: query ledger and replay missed events.
-                    let after_seq: Option<u32> = sr
-                        .last_event_id
-                        .as_ref()
-                        .and_then(|eid| eid.rsplit(':').next().and_then(|s| s.parse::<u32>().ok()));
-
-                    // If last_event_id was provided but invalid, report error.
-                    if sr.last_event_id.is_some() && after_seq.is_none() {
-                        Some(protocol::make_error(
-                            SystemErrorCode::InvalidMessage,
-                            Some(sr.req_id.clone()),
-                            format!(
-                                "session.rejoin: invalid last_event_id '{}'",
-                                sr.last_event_id.as_deref().unwrap_or("")
-                            ),
-                        ))
+                    // P5.2: validate and parse last_event_id.
+                    let mut parse_err: Option<Message> = None;
+                    let mut after_seq: Option<u32> = None;
+                    match &sr.last_event_id {
+                        None => {}
+                        Some(eid) => match protocol::parse_event_id(eid) {
+                            Ok((parsed_task_id, seq)) => {
+                                if parsed_task_id != sr.task_id {
+                                    parse_err = Some(protocol::make_error(
+                                        SystemErrorCode::InvalidMessage,
+                                        Some(sr.req_id.clone()),
+                                        format!(
+                                            "session.rejoin: last_event_id task '{}' != task_id '{}'",
+                                            parsed_task_id, sr.task_id
+                                        ),
+                                    ));
+                                } else {
+                                    after_seq = Some(seq);
+                                }
+                            }
+                            Err(e) => {
+                                parse_err = Some(protocol::make_error(
+                                    SystemErrorCode::InvalidMessage,
+                                    Some(sr.req_id.clone()),
+                                    format!("session.rejoin: {e}"),
+                                ));
+                            }
+                        },
+                    }
+                    if parse_err.is_some() {
+                        parse_err
                     } else {
-                        // Replay in an inner async block for `?` ergonomics.
                         let replay = async {
                             let events = ctx
                                 .ledger

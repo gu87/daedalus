@@ -39,8 +39,12 @@ impl Ledger {
         let mtype = message_type.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let conn = crate::db::pool::open(&db_path).map_err(map_db_err)?;
-            let txn = conn.unchecked_transaction().map_err(map_db_err)?;
+            let mut conn = crate::db::pool::open(&db_path).map_err(map_db_err)?;
+            // P5.2: EXCLUSIVE transaction serialises concurrent appends
+            // to the same task, preventing UNIQUE(task_id, seq) conflicts.
+            let txn = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)
+                .map_err(map_db_err)?;
 
             let seq: u32 = txn
                 .query_row(
