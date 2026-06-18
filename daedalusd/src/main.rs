@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use daedalusd::daemon::{DaemonContext, DefaultAgentLoopFactory};
 use daedalusd::gate::{CriteriaRegistry, GateRouter};
+use daedalusd::http::health::HttpState;
 
 /// Orphan scan runs every 60 s.
 const ORPHAN_SCAN_INTERVAL_SECS: u64 = 60;
@@ -36,13 +38,17 @@ async fn main() {
 
     let db_path = state_dir.join("daedalusd.sqlite");
 
-    // ── daemon config (P2.7 + P3.4 gate) ───────────────────────────
+    // ── daemon config (P2.7 + P3.4 gate + P4.1 http) ─────────────
     let mut config = daedalusd::config::DaedalusConfig::load();
     config.db_path = Some(db_path.clone());
 
+    // P4.1: validate HTTP listen address is loopback.
+    if let Err(e) = config.validate_http_addr() {
+        eprintln!("daedalusd fatal: {e}");
+        std::process::exit(1);
+    }
+
     // P3.4: construct GateRouter from gate-criteria.yaml.
-    // File not found → defaults (silent).  YAML parse error / invalid
-    // action → fatal (exit 1).
     let registry = match CriteriaRegistry::with_overrides(&config.gate_criteria_path) {
         Ok(r) => r,
         Err(e) => {
@@ -103,8 +109,33 @@ async fn main() {
         }
     });
 
-    // ── IPC server ─────────────────────────────────────────────────
-    eprintln!("daedalusd v0.2.0 starting on {}", socket_path.display());
+    // ── HTTP server (P4.1) ─────────────────────────────────────────
+    let http_addr = ctx.config.http_addr.clone();
+    let listener = match TcpListener::bind(&http_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("daedalusd fatal: failed to bind HTTP {http_addr}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let http_state = Arc::new(HttpState {
+        ctx: Arc::clone(&ctx),
+        started_at: Instant::now(),
+        socket_path: socket_path.to_string_lossy().into(),
+        db_path: db_path.clone(),
+    });
+    let http_shutdown = shutdown_token.clone();
+    tokio::spawn(async move {
+        daedalusd::http::server::run_http(listener, http_state, http_shutdown).await;
+    });
+
+    // ── signal handler ──────────────────────────────────────────────
+    eprintln!(
+        "daedalusd v0.3.0 starting on {} (http {})",
+        socket_path.display(),
+        http_addr,
+    );
 
     let signal_token = shutdown_token.clone();
     tokio::spawn(async move {
@@ -122,9 +153,9 @@ async fn main() {
         signal_token.cancel();
     });
 
-    let shutdown = shutdown_token.cancelled();
-
-    match daedalusd::ipc::server::run_with_context(&socket_path, shutdown, ctx).await {
+    // ── UDS server (blocking) ──────────────────────────────────────
+    let uds_shutdown = shutdown_token.cancelled();
+    match daedalusd::ipc::server::run_with_context(&socket_path, uds_shutdown, ctx).await {
         Ok(()) => eprintln!("daedalusd shut down cleanly"),
         Err(e) => {
             eprintln!("daedalusd fatal: {}", e);

@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod db;
 pub mod error;
 pub mod gate;
+pub mod http;
 pub mod ipc;
 pub mod llm;
 pub mod tools;

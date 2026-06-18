@@ -84,7 +84,7 @@ mod tests {
     use super::*;
     use crate::daemon::AgentLoopFactory;
     use crate::ipc::session::{PendingPerm, SessionState};
-    use crate::types::{PermissionDecision, PermissionResponse, SessionRejoin, TaskDispatch};
+    use crate::types::PermissionDecision;
     use std::sync::Arc;
 
     fn make_state() -> Arc<SessionState> {
@@ -113,6 +113,7 @@ mod tests {
                 models_yaml_path: "/dev/null".into(),
                 db_path: None,
                 gate_criteria_path: "/dev/null".into(),
+                http_addr: "127.0.0.1:9800".into(),
             },
             db_path: std::path::PathBuf::from("/dev/null"),
             factory: Arc::new(StubFactory),
@@ -247,6 +248,7 @@ mod tests {
                 models_yaml_path: "/dev/null".into(),
                 db_path: None,
                 gate_criteria_path: "/dev/null".into(),
+                http_addr: "127.0.0.1:9800".into(),
             },
             db_path: std::path::PathBuf::from("/dev/null"),
             factory: Arc::new(ErrFactory),

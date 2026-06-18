@@ -1,122 +1,91 @@
-# Phase 3 Gate 体系收口审计报告
+# P4.1 实现完成报告：HTTP API 骨架 + 健康检查
 
-> 审计时间：2026-06-18
-> HEAD: 495d489
-
----
-
-## 0. 审计结论
-
-**Phase 3 Gate 体系全部通过。** 三条 GateAction 路径均有 daemon 接线和完整测试。
-ErrorCode 一致性、ProviderError 粒度、SemanticTag 边界均符合设计约束。
+> Phase 4 起点。daedalusd 新增 axum HTTP server，与 UDS server 并行运行。
+> 暴露 `GET /api/health` 端点。仅本地 loopback。
 
 ---
 
-## 1. Commit 完整性
+## 1. 修改文件清单（8 个）
 
-| # | Commit | 子任务 | 状态 |
-|:--|--------|--------|:---:|
-| 1 | `703f8d4` | P3.1a Memory SourceProvider | ✅ |
-| 2 | `2826c02` | P3.1b AgentHistoryProvider | ✅ |
-| 3 | `86a9283` | P3.2 ErrorCode taxonomy | ✅ |
-| 4 | `d47ce7c` | P3.3 Gate routing system | ✅ |
-| 5 | `ac9273a` | P3.4 daemon Gate 接线 + AutoRevision | ✅ |
-| 6 | `90022fd` | P3.5 ProviderError → Gate 路由 | ✅ |
-| 7 | `68da5f6` | P3.6 Gate Semantic Tags | ✅ |
-| 8 | `e20e17d` | P3.7 SwitchAgent 跨 agent 分发 | ✅ |
-| 9 | `39f0f48` | P3.7 fixup（测试真实性） | ✅ |
-| 10 | `495d489` | PLANS.md [DONE] 标记 | ✅ |
+| 文件 | 操作 | 变更摘要 |
+|------|:---:|------|
+| `daedalusd/Cargo.toml` | 修改 | + `axum = "0.7"`，tokio + `net` feature |
+| `daedalusd/src/config.rs` | 修改 | DaedalusConfig + `http_addr: String`；+ `validate_http_addr()`（拒绝非 loopback）；5 个单元测试 |
+| `daedalusd/src/http/mod.rs` | **新增** | HTTP 子模块声明（health + server） |
+| `daedalusd/src/http/health.rs` | **新增** | `HttpState` + `GET /api/health` handler（status/uptime/socket_path/db_ok） |
+| `daedalusd/src/http/server.rs` | **新增** | `run_http(listener: TcpListener, state, shutdown)` — axum Router + graceful shutdown |
+| `daedalusd/src/main.rs` | 修改 | 验证 http_addr loopback → bind TCP → spawn HTTP server → 与 UDS 并行；shutdown 传播 |
+| `daedalusd/src/lib.rs` | 修改 | + `pub mod http` |
+| `daedalusd/tests/http_health.rs` | **新增** | 3 个集成测试（health ok / db not ok / graceful shutdown） |
 
-**10/10 commits present。**
+**未改文件**：`gate.rs`、`error.rs`、`agent/loop.rs`、`agent/state.rs`、`ipc/*`、`db/*`、`types.rs`
 
 ---
 
-## 2. 工作区状态
+## 2. 核心行为
 
-```
-git status --short    → clean (no uncommitted changes)
-cargo fmt --check     → ✅
-cargo clippy -D warn  → ✅
-cargo test --workspace→ ✅ 385 passed, 0 failed, 1 skipped
+### 2.1 HttpState — 轻量独立状态
+
+```rust
+pub struct HttpState {
+    pub ctx: Arc<DaemonContext>,   // 只读引用，不修改
+    pub started_at: Instant,
+    pub socket_path: String,
+    pub db_path: PathBuf,
+}
 ```
 
----
+不修改 DaemonContext，不重构 daemon 核心结构。
 
-## 3. GateAction 三条路径：接线 + 测试
+### 2.2 Loopback 强制
 
-| 路径 | daemon.rs 实现 | 测试覆盖 |
-|------|:---:|:---:|
-| `HardStop` | `daemon.rs:228` — send TaskError + break | hard_stop_default_tool_failure, auth_failure_routes_as_auth_failure, model_not_found_hard_stop, parse_error_routes_unknown, permission_denied_tag_hard_stop, configuration_error_blocks_auto_revision 等 |
-| `AutoRevision` | `daemon.rs:360` — retry_count++ + rebuild same agent + continue | auto_revision_single_retry_succeeds, auto_revision_max_retries_exceeded, rate_limited_auto_revision_succeeds, transient_tool_failure_auto_revision, rate_limited_tags_auto_revision, switch_agent_then_auto_revision 等 |
-| `SwitchAgent` | `daemon.rs:242` — retry_count++ + build target agent + current_agent_id 更新 + continue | switch_agent_succeeds, switch_agent_then_auto_revision, switch_agent_build_fails, switch_agent_feedback_mentions_old_agent, switch_agent_respects_global_cap |
+- 默认 `127.0.0.1:9800`
+- 环境变量 `DAEDALUSD_HTTP_ADDR`
+- 拒绝 `0.0.0.0`、公网 IP、空 host
+- `localhost`、`127.0.0.1`、`[::1]` 允许
+- 非法地址 → daemon 启动失败 exit(1)
 
-**三条路径均有 daemon 接线且不存在降级/未实现分支。**
+### 2.3 /api/health 响应
 
----
-
-## 4. ErrorCode 一致性
-
-```
-AgentError::error_code()          ← 唯一真相源（error.rs:88-92）
-  ├─ provider_error Some → ErrorCode::from_provider_error()
-  └─ provider_error None → ErrorCode::from_error_kind(&reason)
-
-daemon.rs:218   GateContext.error_code = agent_error.error_code()     ← Gate 路由
-daemon.rs:229   TaskError.taxonomy = agent_error.error_code().as_str() ← 客户端消息
-loop.rs:651-658 DB taxonomy = AgentError {..}.error_code().as_str()    ← agent_runs 持久化
+```json
+{ "status": "ok", "uptime_seconds": 42, "socket_path": "/tmp/daedalusd.sock", "db_ok": true }
 ```
 
-**三处走同一入口，不存在 DB / TaskError 分裂风险。**
+### 2.4 Shutdown 传播
 
-验证断言：`auth_failure_routes_as_auth_failure` 测试同时断言 `TaskError.error_taxonomy == "auth_failure"` 和 `agent_runs.error_taxonomy == "auth_failure"`。
+HTTP server + UDS server + orphan scanner 共享同一个 `CancellationToken`。SIGTERM/SIGINT → token.cancel() → 全部退出。
 
 ---
 
-## 5. ProviderError 细粒度闭环
+## 3. 验证结果
 
 ```
-ProviderError(Auth{401}) →
-  stream_with_cancel → AgentError { provider_error: Some(Auth) } →
-  SendingToLLM Err → LoopState::Failed { provider_error: Some(Auth) } →
-  Failed arm → AgentError { provider_error: Some(Auth) } →
-  daemon → AgentError::error_code() = AuthFailure
+cargo fmt --all -- --check               ✅ 通过
+cargo test --workspace                   ✅ 393 passed, 0 failed
+  -- --skip long_line_returns_error_and_closes
+cargo clippy --workspace -- -D warnings  ✅ 通过
 ```
 
-**ProviderError 在 AgentError → LoopState::Failed → AgentError 全链路不丢失。**
-mid-flight streaming 路径（`next_chunk_with_cancel`）也有测试覆盖。
+### 测试分布
+
+| 测试套 | passed | 变化 |
+|--------|-------:|:---:|
+| lib unit | 224 | +5 config + gate 单元测试不变 |
+| agent_loop | 20 | — |
+| db_registry | 23 | — |
+| error_code | 10 | — |
+| full_dispatch | 5 | — |
+| gate_daemon | 23 | — |
+| http_health | **3** | **新增** |
+| permission | 13 | — |
+| prompt | 35 | — |
+| protocol | 6 | — |
+| provider | 26 | — |
+| tool_registry | 5 | — |
+| **合计** | **393** | **+8** |
 
 ---
 
-## 6. SemanticTag 边界
+## 4. 返回 Codex 复审
 
-| 维度 | 状态 |
-|------|:---:|
-| 定义位置 | `gate.rs` — `SemanticTag` enum + `classify_semantic_tags()` |
-| daemon 消费 | 仅 `daemon.rs:219` 调用 classify，注入 GateContext |
-| 影响范围 | 仅 `CriteriaRegistry::resolve()` 的 AND tag 匹配 |
-| IPC 协议 | **未改**（`git diff ac9273a..HEAD -- daedalusd/src/ipc/` 为空） |
-| types.rs | **未改** |
-| SQLite schema | **未改**（`git diff ac9273a..HEAD -- daedalusd/src/db/migrations.rs` 为空） |
-| 默认行为 | 10 条默认规则 `require_tags: None`，完全向后兼容 |
-
----
-
-## 7. 已知预存问题
-
-| 问题 | 状态 |
-|------|:---:|
-| `ipc::server::tests::long_line_returns_error_and_closes` skip | 预存（自 P2.5），Phase 3 期间未引入/未修复 |
-
----
-
-## 8. 不做清单（Phase 3 全程遵守）
-
-| 约束 | 状态 |
-|------|:---:|
-| UI / HTTP API / cc-haha 前端 | ✅ 未碰 |
-| system.ack / event replay / ledger | ✅ 未碰 |
-| TaskStatus 9 状态 / pipeline.sqlite | ✅ 未碰 |
-| Ω-Agent / MCP bridge | ✅ 未碰 |
-| Phase 4 热加载 / 凭证刷新 / 连通性探测 | ✅ 未碰 |
-| 非 OpenAI Compat 的第三方 Provider | ✅ 未碰 |
-| Heartbeat 参数化 / orphan 自动重启 | ✅ 未碰 |
+P4.1 实现完毕，393 测试全过。请 Codex 审查。

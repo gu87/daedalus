@@ -1,0 +1,34 @@
+//! P4.1: axum HTTP server — builds a Router and serves on a TCP listener.
+//!
+//! `run_http(listener, state, shutdown)` starts the server and returns when
+//! the shutdown token is cancelled.
+
+use std::sync::Arc;
+
+use axum::routing::get;
+use axum::Router;
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+
+use super::health::{self, HttpState};
+
+/// Start the HTTP server on `listener`.
+///
+/// `state` is shared across all handlers.
+/// `shutdown` cancels graceful shutdown — the server stops accepting new
+/// connections and drains existing ones.
+pub async fn run_http(listener: TcpListener, state: Arc<HttpState>, shutdown: CancellationToken) {
+    // Build the router.
+    let app = Router::new()
+        .route("/api/health", get(health::health))
+        .with_state(state);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+        })
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("daedalusd http: server error: {e}");
+        });
+}

@@ -129,6 +129,8 @@ pub struct DaedalusConfig {
     pub db_path: Option<std::path::PathBuf>,
     /// P3.4: path to gate-criteria.yaml.  File not found → defaults only (silent).
     pub gate_criteria_path: String,
+    /// P4.1: HTTP listen address.  Must be a loopback address.
+    pub http_addr: String,
 }
 
 impl DaedalusConfig {
@@ -146,6 +148,102 @@ impl DaedalusConfig {
             db_path: None,
             gate_criteria_path: std::env::var("DAEDALUS_GATE_CRITERIA_PATH")
                 .unwrap_or_else(|_| format!("{home}/.daedalus/config/gate-criteria.yaml")),
+            http_addr: std::env::var("DAEDALUSD_HTTP_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:9800".to_string()),
+        }
+    }
+
+    /// P4.1: validate that `http_addr` is a loopback address.
+    ///
+    /// Returns `Ok(())` if the host portion is `127.0.0.1`, `::1`, or
+    /// `localhost`.  Returns `Err` for `0.0.0.0` or any non-loopback IP.
+    pub fn validate_http_addr(&self) -> Result<(), DaedalusError> {
+        // Extract host from "host:port" or "[host]:port".
+        let host = if self.http_addr.starts_with('[') {
+            // IPv6 bracket notation: [::1]:9800
+            match self.http_addr.find(']') {
+                Some(end) => &self.http_addr[1..end],
+                None => {
+                    return Err(DaedalusError::Protocol(
+                        "DAEDALUSD_HTTP_ADDR: malformed IPv6 address (missing ']')".into(),
+                    ));
+                }
+            }
+        } else {
+            // Plain host:port or just host.
+            self.http_addr.rsplit(':').next_back().unwrap_or(&self.http_addr)
+        };
+
+        match host {
+            "127.0.0.1" | "::1" | "localhost" => Ok(()),
+            "0.0.0.0" => Err(DaedalusError::Protocol(
+                "DAEDALUSD_HTTP_ADDR must be a loopback address, not 0.0.0.0".into(),
+            )),
+            _ => Err(DaedalusError::Protocol(format!(
+                "DAEDALUSD_HTTP_ADDR must be a loopback address (127.0.0.1 or ::1), got {host}"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_loopback_ok() {
+        let c = DaedalusConfig {
+            http_addr: "127.0.0.1:9800".into(),
+            ..dummy_config()
+        };
+        assert!(c.validate_http_addr().is_ok());
+    }
+
+    #[test]
+    fn validate_localhost_ok() {
+        let c = DaedalusConfig {
+            http_addr: "localhost:9800".into(),
+            ..dummy_config()
+        };
+        assert!(c.validate_http_addr().is_ok());
+    }
+
+    #[test]
+    fn validate_ipv6_loopback_ok() {
+        let c = DaedalusConfig {
+            http_addr: "[::1]:9800".into(),
+            ..dummy_config()
+        };
+        assert!(c.validate_http_addr().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zeros() {
+        let c = DaedalusConfig {
+            http_addr: "0.0.0.0:9800".into(),
+            ..dummy_config()
+        };
+        assert!(c.validate_http_addr().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_public() {
+        let c = DaedalusConfig {
+            http_addr: "192.168.1.1:9800".into(),
+            ..dummy_config()
+        };
+        assert!(c.validate_http_addr().is_err());
+    }
+
+    fn dummy_config() -> DaedalusConfig {
+        DaedalusConfig {
+            soul_path: "/tmp/soul.md".into(),
+            managed_agents_path: "/tmp/agents.yaml".into(),
+            skills_dir: "/tmp/skills".into(),
+            models_yaml_path: "/tmp/models.yaml".into(),
+            db_path: None,
+            gate_criteria_path: "/tmp/gate.yaml".into(),
+            http_addr: "127.0.0.1:9800".into(),
         }
     }
 }
