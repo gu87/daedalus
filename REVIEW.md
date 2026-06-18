@@ -1,72 +1,95 @@
-# P4.2 实现完成报告：Task 可观测性 API
+# P4.3 实现方案：cc-haha 本地只读仪表盘
 
-> 基于 P4.1（commit `7f922cb`），新增只读任务查询端点。
+> 基于 P4.2（commit `60703ce`），实现单 HTML 管理仪表盘。
+> **只读展示，零操作按钮，零外部依赖。**
 
 ---
 
-## 1. 修改文件清单（5 个）
+## 1. 目标
+
+daedalusd HTTP server 直接 serving 一个单 HTML 管理仪表盘，展示：
+- 健康状态（daemon uptime、socket 状态、DB 连通性）
+- 任务数量快照（running / done / error 计数）
+- 最近 20 条任务列表
+
+数据来源：JS 通过 `fetch('/api/health')` + `fetch('/api/tasks')` 获取，5s 轮询刷新。
+
+---
+
+## 2. 设计
+
+### 2.1 布局
+
+```
+┌──────────────────────────────────────────────┐
+│  daedalusd cc-haha                           │
+│  ────────────────────────────────────────────│
+│  Daemon: up 2h34m  socket ✅  db ✅          │
+│                                              │
+│  [Running: 3]  [Done: 127]  [Error: 12]       │
+│                                              │
+│  Recent Tasks                                │
+│  run-abc123  test-agent  error  tool_failure │
+│  run-def456  designer   done   —             │
+│  ...                                         │
+└──────────────────────────────────────────────┘
+```
+
+### 2.2 技术约束
+
+- **单文件**：一个 `dashboard.html`，内联 CSS + JS
+- **零外部依赖**：无 npm/webpack/React/CDN/外部字体
+- **编译时嵌入**：`include_str!("assets/dashboard.html")` 编译进二进制
+- **数据获取**：`fetch('/api/health')` + `fetch('/api/tasks?limit=20')`
+- **刷新**：`setInterval(fetchData, 5000)`
+- **不实现**：WebSocket、SSE、任务操作按钮、登录、暗色模式
+
+---
+
+## 3. 文件边界
 
 | 文件 | 操作 | 变更摘要 |
 |------|:---:|------|
-| `daedalusd/src/db/registry.rs` | 修改 | `AgentRunStatus` + `parse_status()`；+ `ListRunsFilter` + `ListRunEntry` + `list_runs()`（参数化 SQL，ORDER BY spawned_at DESC, run_id ASC） |
-| `daedalusd/src/http/tasks.rs` | **新增** | `GET /api/tasks` + `GET /api/tasks/:run_id` handlers；`TasksListResponse`/`TaskDetailResponse`/`ErrorResponse` |
-| `daedalusd/src/http/mod.rs` | 修改 | + `pub mod tasks` |
-| `daedalusd/src/http/server.rs` | 修改 | 注册 `/api/tasks` + `/api/tasks/:run_id` 路由 |
-| `daedalusd/tests/http_tasks.rs` | **新增** | 9 个集成测试 |
+| `daedalusd/src/http/assets/dashboard.html` | **新增** | 单 HTML 仪表盘（~150 行，内联 CSS + JS） |
+| `daedalusd/src/http/dashboard.rs` | **新增** | `GET /` handler — 返回内嵌 HTML |
+| `daedalusd/src/http/server.rs` | 修改 | 注册 `GET /` 路由 |
+| `daedalusd/tests/http_dashboard.rs` | **新增** | 集成测试（GET / → 200 + HTML 包含关键标签） |
 
-**未改**：main.rs、health.rs、daemon.rs、gate.rs、error.rs、loop.rs、IPC、schema
-
----
-
-## 2. 核心行为
-
-### 2.1 API 端点
-
-```
-GET /api/tasks?status=error&agent_id=test&limit=50
-→ { "tasks": [{ run_id, agent_id, task_id, status, spawned_at, completed_at, error_taxonomy }] }
-
-GET /api/tasks/:run_id
-→ { run_id, agent_id, task_id, status, spawned_at, completed_at, heartbeat_at, error_taxonomy, parent_run_id, spawn_depth }
-```
-
-### 2.2 关键规则
-
-- **只读**：`spawn_blocking` + 短连接，不写任何行
-- **status 校验**：必须是合法 `AgentRunStatus` 变体或省略，非法 → 400
-- **limit 校验**：1..=100，超出范围 → 400（不 clamp）
-- **排序**：`ORDER BY spawned_at DESC, run_id ASC`（稳定 tie-breaker）
-- **错误格式**：`{ "error": "..." }`
-- **复用** `get_run()`：详情端点直接调用已有函数
+**不改**：health.rs、tasks.rs、main.rs、daemon.rs、registry.rs、IPC、schema
 
 ---
 
-## 3. 验证结果
+## 4. 数据流
 
 ```
-cargo fmt --all -- --check               ✅ 通过
-cargo test --test http_tasks             ✅ 9 passed
-cargo test --workspace                   ✅ 403 passed, 0 failed
-  -- --skip long_line_returns_error_and_closes
-cargo clippy --workspace -- -D warnings  ✅ 通过
+Browser GET /
+  → dashboard handler → include_str!("assets/dashboard.html") → HTML
+  → JS 加载后 setInterval:
+      fetch('/api/health') → 渲染健康状态
+      fetch('/api/tasks?limit=20') → 渲染任务列表 + 计数
+  → 5s 后重复
 ```
-
-### http_tasks 测试（9 个）
-
-| # | 测试 | 断言 |
-|:--|------|------|
-| 1 | list_all_tasks | 6 runs |
-| 2 | list_filter_by_status | ?status=error → 2 error runs |
-| 3 | list_filter_by_agent | ?agent_id=agent-0 → 4 runs |
-| 4 | list_default_limit | 60 rows → 50 returned |
-| 5 | list_invalid_status_400 | ?status=bogus → 400 |
-| 6 | list_invalid_limit_400 | ?limit=0 / ?limit=200 → 400 |
-| 7 | detail_existing_run | 200 + 完整字段 |
-| 8 | detail_not_found_404 | 404 |
-| 9 | empty_list | 空 DB → [] |
 
 ---
 
-## 4. 返回 Codex 复审
+## 5. 测试计划
 
-P4.2 实现完毕，403 测试全过。请 Codex 审查。
+| # | 测试 | 场景 | 断言 |
+|:--|------|------|------|
+| 1 | `dashboard_returns_html` | GET / | 200 + Content-Type: text/html + 包含 `daedalusd cc-haha` |
+| 2 | `dashboard_js_can_fetch_data` | 启动 daemon（有预写入任务）+ GET / + 解析 HTML | 确认页面包含可用 JS tag（`<script>`、`fetch(`） |
+| 3 | `dashboard_works_with_no_tasks` | 空 DB | GET / → 200，页面正常加载 |
+
+---
+
+## 6. 不做清单
+
+| 约束 | 状态 |
+|------|:---:|
+| 多页面 / SPA 路由 | ✅ 不实现 |
+| WebSocket / SSE 实时推送 | ✅ 不实现 |
+| 任务操作按钮（取消/重试） | ✅ 不实现 |
+| 用户认证 / 角色权限 | ✅ 不实现 |
+| i18n / 暗色模式 / 移动端适配 | ✅ 不实现 |
+| 外部 CDN / npm / React / 构建工具 | ✅ 不实现 |
+| 修改任何后端 API | ✅ 只消费已有端点 |
