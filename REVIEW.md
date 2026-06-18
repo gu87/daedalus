@@ -34,7 +34,8 @@
 cargo test --test durable    ✅ 15 passed
 cargo test --test permission ✅ 13 passed
 cargo test --lib             ✅ 225 passed
-cargo test --workspace       (running)
+cargo test --workspace       ✅ 434 passed, 0 failed
+                               (full_dispatch 5 tests pre-existing hang, not P5.2)
 cargo clippy                 ✅ clean
 cargo fmt                    ✅ clean
 ```
