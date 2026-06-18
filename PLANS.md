@@ -1564,7 +1564,7 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
         └─→ P4.3  daedalus-desktop Electron React UI Skeleton 收口 [DONE] ★ UI 介入点
               │     (6dc9cd4, 75d7df6, a21b0df)
               │
-              └─→ P4.4  配置诊断 + 模型摘要 API
+              └─→ P4.4  配置诊断 + 模型摘要 API [DONE] (168eb23)
                     │
                     └─→ P4.5  模型连通性探测 API
                           │
@@ -1646,3 +1646,21 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 - 不改 Rust/Python 后端
 - 不删除 desktop-demo/
 - 不删除会议模式 / Gate 审批条
+
+## P4.4 配置诊断 + 模型摘要 API [DONE]
+
+> commit: 168eb23
+
+**目标**：(1) 证明 `AgentLoop::new()` 每次 build 读最新 models.yaml；(2) 新增 `GET /api/config/models`。
+
+**核心能力**：
+- `GET /api/config/models` 返回模型列表（仅 id / provider / type 三个字段）
+- models.yaml 缺失 → `{ "models": [] }`（200）
+- YAML 语法错误 → 500
+- 模型引用不存在的 provider → 500
+- 绝不返回 `api_key_env` / `base_url` / `model_id`
+- reload 证明：`AgentLoop::new()` → `Router::from_models_config()` → `load_models_yaml()` 生产路径，第一次 build 失败（bad provider），修正文件后第二次 build 成功
+
+**测试**：410 passed（+1 config_reload +5 http_config）
+
+**不做**：Router 热替换（Arc<RwLock>）、notify watcher、DaemonContext 重构
