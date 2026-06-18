@@ -1592,3 +1592,26 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 - 修改文件清单更新：15 个文件（含 Cargo.lock + 测试字段补齐）
 
 **不实现**：Task API、dashboard、config/models、CORS、auth、HTTPS
+
+## P4.2 Task 可观测性 API [DONE]
+
+> commits: 36f688b, fixup: 60703ce
+
+**目标**：在 axum HTTP server 上新增只读任务查询端点。
+
+**核心能力**：
+- `GET /api/tasks?status=&agent_id=&limit=` — 列表查询（过滤 + 分页）
+- `GET /api/tasks/:run_id` — 单任务详情（复用已有 `get_run()`）
+- `db/registry.rs` 新增 `list_runs()` 参数化只读查询（`ORDER BY spawned_at DESC, run_id ASC`）
+- `SQLITE_OPEN_READ_ONLY`，不创建缺失 DB 文件
+- limit 校验 1..=100，超出或非数字 → 400
+- status 校验合法 `AgentRunStatus` 变体，非法 → 400
+
+**测试**：404 passed（+10 http_tasks 集成测试）
+
+**返修点**（60703ce）：
+- tasks.rs 改用 `SQLITE_OPEN_READ_ONLY`，list/detail 不创建缺失 DB
+- `list_invalid_limit_400` 增加 `?limit=abc` 测试
+- registry.rs 注释明确 limit 安全上限，校验职责在 handler
+
+**不实现**：任务取消/重试、分页、WebSocket、统计聚合、outbox_json 返回
