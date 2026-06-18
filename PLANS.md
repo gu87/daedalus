@@ -1546,3 +1546,49 @@ P3.1b AgentHistoryProvider [DONE] (2826c02)
 - 主逻辑范围未扩大
 
 **不改**：gate.rs、error.rs、loop.rs、state.rs、IPC、SQLite schema
+
+---
+
+# Daedalus Phase 4 实施计划
+
+> 范围：蓝图 §14 运维体系 + §10.12 模型池管理。Phase 3 Gate 体系审计通过（ad5af62）。
+> Phase 4 聚焦：HTTP API、只读任务可观测性、管理仪表盘、配置诊断。
+
+## 子任务顺序
+
+```
+P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
+  │
+  └─→ P4.2  Task 可观测性 API（只读）
+        │
+        └─→ P4.3  cc-haha 本地只读仪表盘 ★ UI 介入点
+              │
+              └─→ P4.4  配置诊断 + 模型摘要 API
+                    │
+                    └─→ P4.5  模型连通性探测 API
+                          │
+                          └─→ P4.6  Phase 4 验收收口
+```
+
+## P4.1 HTTP API 骨架 + 健康检查 [DONE]
+
+> commits: 5112720, fixup: 7f922cb
+
+**目标**：在 daedalusd 中启动 axum HTTP server（仅 127.0.0.1），暴露 `GET /api/health`。
+
+**核心变更**：
+- `Cargo.toml` + axum 0.7，tokio + net feature
+- `config.rs` + `http_addr` 字段 + `validate_http_addr()` loopback 强制
+- `http/health.rs` — `HttpState`（轻量，不修改 DaemonContext）+ health handler
+- `http/server.rs` — `run_http(listener, state, shutdown)` axum Router
+- `main.rs` — HTTP server 与 UDS 并行 + shared CancellationToken shutdown
+- HTTP listen 仅 bind 127.0.0.1，`DAEDALUSD_HTTP_ADDR` 环境变量
+
+**测试**：394 passed（+4 http_health 集成测试）
+
+**返修点**（7f922cb）：
+- `main.rs`：保存 `http_handle`，UDS 返回后 cancel + timeout(3s) 等待 HTTP graceful shutdown
+- `health.rs`：改 `SQLITE_OPEN_READ_ONLY` + schema 验证，不创建空 DB；新增测试断言
+- 修改文件清单更新：15 个文件（含 Cargo.lock + 测试字段补齐）
+
+**不实现**：Task API、dashboard、config/models、CORS、auth、HTTPS
