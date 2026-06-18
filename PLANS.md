@@ -1727,7 +1727,8 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 ```
 P5.1  DAEDALUS.md 项目指令源 [DONE] (07fb756, fixups: 72de9ac, d790b6f, bb9160a)
   │
-P5.2  Durable Execution (system.ack + event ledger + session.rejoin)
+P5.2  Durable Execution (system.ack + event ledger + session.rejoin) [DONE]
+  │     (f5b6b29, fixups: 353744c, 2020275, c8c2340, a2dcbff, 8691a49, 15f64a9)
   │     │
   │     └─→ P5.3b Pipeline ↔ daemon/Gate/Durable Events 接线
   │
@@ -1756,3 +1757,31 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD（独立于 P5.1/P5.2）
 - daedalusd/src/ipc/control.rs 仅为 struct literal 补字段，无 IPC 行为变化
 
 **不做**：其他 Memory Provider（已全部存在）、DAEDALUS.md 热加载
+
+## P5.2 Durable Execution [DONE]
+
+> commits: f5b6b29, fixups: 353744c, 2020275, c8c2340, a2dcbff, 8691a49, 15f64a9
+
+**目标**：实现可靠事件投递——system.ack、event ledger、session.rejoin 回放。
+
+**核心能力**：
+- `events` 表（migration v2）：`UNIQUE(task_id, seq)` + `UNIQUE(event_id)`
+- `Ledger`：async `append_event`（EXCLUSIVE txn 内原子 seq）、`query_events_since`（Option<u32>）、`mark_acked`（→ bool）
+- `parse_event_id()`：校验 `{task_id}:{seq}` 格式
+- `system.ack`：client→server，req_id 必填，event_id 格式校验，幂等
+- `session.rejoin`：last_event_id None→全部回放，Some→校验 task 前缀→seq>查询→parse_message 反序列化
+- `send_reliable_event()`：统一封装（生成 event_id→写 ledger→发送）
+- daemon 全部 9 条推送路径走 reliable send（0 直接发送）
+- `PermissionBroker::request_permission + task_id` 签名穿透，IpcPermissionBroker 通过 `send_reliable_event` 发送
+
+**测试**：434 passed（15 durable + 13 permission + 225 lib + …），0 failed，fmt/clippy clean
+
+**返修记录**：
+- 353744c：session.rejoin 回放 + system.ack mark_acked + IpcPermissionBroker reliable
+- 2020275：6 daemon TaskError 路径 → reliable
+- c8c2340：permission 测试 IpcPermissionBroker ledger 参数 + event_id unused 警告
+- a2dcbff：parse_event_id 格式校验 + EXCLUSIVE txn + permission 真实 temp ledger
+- 8691a49：mismatched_task_id 断言修正 + permission 10 个测试补 TempDir
+- 15f64a9：workspace 434 passed 确认
+
+**不做**：未 ack 超时重发、global event_id、disk queue、peer.rs ledger
