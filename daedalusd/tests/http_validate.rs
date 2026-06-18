@@ -41,6 +41,7 @@ async fn start_server_with_models(
             config: config.clone(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

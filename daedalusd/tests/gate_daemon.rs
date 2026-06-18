@@ -377,6 +377,7 @@ async fn hard_stop_default_tool_failure() {
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -479,6 +480,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -577,6 +579,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -665,6 +668,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -752,6 +756,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -841,6 +846,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -938,6 +944,7 @@ async fn auth_failure_routes_as_auth_failure() {
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1024,6 +1031,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1096,6 +1104,7 @@ async fn model_not_found_hard_stop() {
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1159,6 +1168,7 @@ async fn provider_timeout_routes_provider_exhausted() {
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1223,6 +1233,7 @@ async fn parse_error_routes_unknown() {
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1291,6 +1302,7 @@ async fn tool_failure_no_provider_error_unchanged() {
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1373,6 +1385,7 @@ async fn streaming_midflight_provider_error_preserved() {
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1464,6 +1477,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1582,6 +1596,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1655,6 +1670,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1738,6 +1754,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1833,6 +1850,7 @@ async fn default_rules_unchanged_by_tags() {
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -1926,6 +1944,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -2062,6 +2081,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -2148,6 +2168,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());
@@ -2240,6 +2261,7 @@ rules:
         db_path: db_path.clone(),
         factory,
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     let td = make_td(dummy_task_card());

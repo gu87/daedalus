@@ -50,6 +50,7 @@ async fn health_returns_ok() {
             config: config.clone(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))),
     });
 
     // Bind HTTP on ephemeral port.
@@ -105,6 +106,7 @@ async fn health_db_not_ok_when_sqlite_absent() {
             config: config.clone(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))),
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -151,6 +153,7 @@ async fn health_db_file_missing_dir_exists() {
             config: config.clone(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))),
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -202,6 +205,7 @@ async fn health_server_shuts_down_gracefully() {
             config: config.clone(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))),
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

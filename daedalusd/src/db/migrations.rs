@@ -9,10 +9,11 @@ struct Migration {
     sql: &'static str,
 }
 
-/// All migrations in version order (only v1 for Phase 1).
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: "\
+/// All migrations in version order.
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: "\
 CREATE TABLE IF NOT EXISTS agent_runs (
     run_id          TEXT PRIMARY KEY,
     agent_id        TEXT NOT NULL,
@@ -38,7 +39,26 @@ CREATE INDEX IF NOT EXISTS idx_orphan_check
     ON agent_runs(status, heartbeat_at)
     WHERE status = 'running';
 ",
-}];
+    },
+    // P5.2: reliable event delivery ledger.
+    Migration {
+        version: 2,
+        sql: "\
+CREATE TABLE IF NOT EXISTS events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL,
+    seq           INTEGER NOT NULL,
+    event_id      TEXT NOT NULL UNIQUE,
+    message_type  TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    acked_at      INTEGER NULL,
+    created_at    INTEGER NOT NULL,
+    UNIQUE(task_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_events_task_seq ON events(task_id, seq);
+",
+    },
+];
 
 /// Apply every pending migration.  Each migration runs inside a
 /// [`Transaction`] so a failure rolls back both the DDL changes and the
@@ -93,14 +113,14 @@ mod tests {
         let v1: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(v1, 1, "user_version should be 1 after first run");
+        assert_eq!(v1, 2, "user_version should be 2 after first run (v1+v2)");
 
         // Second run — should be a no-op.
         run_all(&mut conn).unwrap();
         let v2: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 1, "user_version should still be 1 after second run");
+        assert_eq!(v2, 2, "user_version should still be 2 after second run");
     }
 
     #[test]
@@ -149,6 +169,6 @@ NOT VALID SQL AT ALL;
         let v: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 1, "real migration must succeed after bogus rollback");
+        assert_eq!(v, 2, "real migration must succeed after bogus rollback (v1+v2)");
     }
 }

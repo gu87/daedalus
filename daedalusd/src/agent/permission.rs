@@ -26,11 +26,15 @@ use crate::types::{Message, PermissionDecision, PermissionRequest, ToolCall};
 pub trait PermissionBroker: Send + Sync {
     /// Request permission to execute `tool_call` on behalf of `agent_id`
     /// within task `req_id`.
+    ///
+    /// P5.2: `task_id` is the business task identifier, used for
+    /// reliable event delivery (task-scoped event_id).
     async fn request_permission(
         &self,
         agent_id: &str,
         req_id: &str,
         tool_call: &ToolCall,
+        task_id: &str,
     ) -> Result<PermissionDecision, AgentError>;
 }
 
@@ -51,6 +55,7 @@ impl PermissionBroker for FakePermissionBroker {
         _agent_id: &str,
         _req_id: &str,
         _tool_call: &ToolCall,
+        _task_id: &str,
     ) -> Result<PermissionDecision, AgentError> {
         if let Some(d) = self.delay {
             tokio::time::sleep(d).await;
@@ -91,6 +96,7 @@ impl PermissionBroker for IpcPermissionBroker {
         agent_id: &str,
         req_id: &str,
         tool_call: &ToolCall,
+        _task_id: &str,
     ) -> Result<PermissionDecision, AgentError> {
         // Guard: req_id must not be empty.
         if req_id.is_empty() {

@@ -499,7 +499,7 @@ impl AgentLoop {
                         .unwrap_or("");
                     select! {
                         decision = self.permission_broker
-                            .request_permission(&self.agent_id, req_id, &tool_call) => {
+                            .request_permission(&self.agent_id, req_id, &tool_call, &task_id) => {
                             match decision {
                                 Ok(PermissionDecision::Approved) => {
                                     // Execute directly to avoid re-entering

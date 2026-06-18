@@ -35,6 +35,9 @@ pub async fn run(
             config: crate::config::DaedalusConfig::load(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+        ledger: Arc::new(crate::db::ledger::Ledger::new(std::path::Path::new(
+            "/dev/null",
+        ))),
     });
     run_inner(socket_path, shutdown, ctx).await
 }
@@ -377,6 +380,9 @@ mod tests {
                 config: crate::config::DaedalusConfig::load(),
             }),
             gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+            ledger: Arc::new(crate::db::ledger::Ledger::new(std::path::Path::new(
+                "/dev/null",
+            ))),
         });
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();

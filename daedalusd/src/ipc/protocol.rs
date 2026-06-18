@@ -162,6 +162,7 @@ fn parse_value(value: Value) -> Result<Message, ProtocolError> {
             | "permission.request"
             | "permission.response"
             | "session.rejoin"
+            | "system.ack"
     ) {
         return Err(ProtocolError {
             code: SystemErrorCode::UnknownMessageType,
@@ -353,6 +354,24 @@ fn validate_message(msg: &Message) -> Result<(), ProtocolError> {
                     });
                 }
                 _ => {}
+            }
+            Ok(())
+        }
+        // P5.2: system.ack validation.
+        Message::SystemAck(sa) => {
+            if sa.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "system.ack: 'req_id' must not be empty".into(),
+                });
+            }
+            if sa.event_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(sa.req_id.clone()),
+                    detail: "system.ack: 'event_id' must not be empty".into(),
+                });
             }
             Ok(())
         }

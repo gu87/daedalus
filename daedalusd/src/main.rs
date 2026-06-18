@@ -63,6 +63,7 @@ async fn main() {
         db_path: db_path.clone(),
         factory: Arc::new(DefaultAgentLoopFactory { config }),
         gate_router,
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
     });
 
     // ── shared shutdown token ──────────────────────────────────────

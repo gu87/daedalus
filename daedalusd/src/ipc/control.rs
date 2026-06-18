@@ -69,7 +69,8 @@ pub async fn route(
                 Message::TaskStream(_)
                 | Message::TaskDone(_)
                 | Message::TaskError(_)
-                | Message::PermissionRequest(_) => None,
+                | Message::PermissionRequest(_)
+                | Message::SystemAck(_) => None,
             }
         }
         Err(pe) => Some(pe.into_message()),
@@ -122,6 +123,9 @@ mod tests {
                 crate::gate::CriteriaRegistry::defaults(),
                 5,
             )),
+            ledger: Arc::new(crate::db::ledger::Ledger::new(std::path::Path::new(
+                "/dev/null",
+            ))),
         })
     }
 
@@ -258,6 +262,9 @@ mod tests {
                 crate::gate::CriteriaRegistry::defaults(),
                 5,
             )),
+            ledger: Arc::new(crate::db::ledger::Ledger::new(std::path::Path::new(
+                "/dev/null",
+            ))),
         });
         let state = make_state();
         let (tx, mut rx) = make_writer();

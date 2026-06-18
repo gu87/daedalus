@@ -73,6 +73,9 @@ pub enum Message {
     PermissionResponse(PermissionResponse),
     #[serde(rename = "session.rejoin")]
     SessionRejoin(SessionRejoin),
+    /// P5.2: client acknowledges receipt of a reliable event.
+    #[serde(rename = "system.ack")]
+    SystemAck(SystemAck),
 }
 
 // ── Shared domain types ──────────────────────────────────────────────
@@ -277,6 +280,16 @@ pub struct SessionRejoin {
     pub task_id: String,
     #[serde(default)]
     pub last_event_id: Option<String>,
+}
+
+/// P5.2: client acknowledges a reliably-delivered event.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SystemAck {
+    pub ts: String,
+    /// Identifier for the acknowledged event.
+    pub event_id: String,
+    /// Client-generated request id for error correlation.
+    pub req_id: String,
 }
 
 pub fn check_schema_version(field: &str, version: &str) -> Result<(), String> {

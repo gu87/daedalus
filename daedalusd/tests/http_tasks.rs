@@ -33,6 +33,7 @@ async fn start_server(db_path: &std::path::Path) -> (String, CancellationToken) 
             config: config.clone(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))),
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -331,6 +332,7 @@ async fn tasks_endpoint_readonly_does_not_create_db() {
             config: config.clone(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(std::path::Path::new("/dev/null"))),
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

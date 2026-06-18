@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::permission::{IpcPermissionBroker, PermissionBroker};
 use crate::agent::r#loop::{AgentLoop, LifecycleContext};
 use crate::config::DaedalusConfig;
+use crate::db::ledger::Ledger;
 use crate::db::{pool, registry};
 use crate::error::{DaedalusError, ErrorCode};
 use crate::gate::{GateAction, GateContext, GateRouter};
@@ -83,6 +84,8 @@ pub struct DaemonContext {
     pub factory: Arc<dyn AgentLoopFactory>,
     /// P3.4: Gate router used to decide retry / switch / hard-stop on error.
     pub gate_router: Arc<GateRouter>,
+    /// P5.2: event ledger for Durable Execution.
+    pub ledger: Arc<Ledger>,
 }
 
 impl DaemonContext {
@@ -184,6 +187,7 @@ impl DaemonContext {
         let db_path = self.db_path.clone();
         let gate_router = Arc::clone(&self.gate_router);
         let factory = Arc::clone(&self.factory);
+        let ledger = Arc::clone(&self.ledger);
         let writer_tx2 = writer_tx.clone();
 
         tokio::spawn(async move {
@@ -203,15 +207,27 @@ impl DaemonContext {
                     .await
                 {
                     Ok(outbox) => {
-                        let msg = Message::TaskDone(Box::new(TaskDone {
-                            ts: protocol::now_utc(),
-                            event_id: event_id.clone(),
-                            req_id: req_id.clone(),
-                            agent_id: current_agent_id.clone(),
-                            task_id: task_id.clone(),
-                            outbox,
-                        }));
-                        let _ = writer_tx2.send(msg).await;
+                        let tid = task_id.clone();
+                        let aid = current_agent_id.clone();
+                        let rid = req_id.clone();
+                        let tid2 = tid.clone();
+                        let _ = crate::ipc::reliable::send_reliable_event(
+                            &writer_tx2,
+                            &ledger,
+                            &tid2,
+                            "task.done",
+                            move |event_id| {
+                                Message::TaskDone(Box::new(TaskDone {
+                                    ts: protocol::now_utc(),
+                                    event_id: Some(event_id),
+                                    req_id: rid,
+                                    agent_id: aid,
+                                    task_id: tid,
+                                    outbox,
+                                }))
+                            },
+                        )
+                        .await;
                         break;
                     }
                     Err(agent_error) => {
@@ -226,17 +242,30 @@ impl DaemonContext {
                         };
                         match gate_router.route(&ctx) {
                             GateAction::HardStop => {
-                                let taxonomy = agent_error.error_code().as_str();
-                                let msg = Message::TaskError(TaskError {
-                                    ts: protocol::now_utc(),
-                                    event_id: event_id.clone(),
-                                    req_id: req_id.clone(),
-                                    agent_id: current_agent_id.clone(),
-                                    task_id: task_id.clone(),
-                                    error_taxonomy: taxonomy.into(),
-                                    detail: agent_error.detail,
-                                });
-                                let _ = writer_tx2.send(msg).await;
+                                let taxonomy = agent_error.error_code().as_str().to_string();
+                                let detail = agent_error.detail.clone();
+                                let tid = task_id.clone();
+                                let aid = current_agent_id.clone();
+                                let rid = req_id.clone();
+                                let tid2 = tid.clone();
+                                let _ = crate::ipc::reliable::send_reliable_event(
+                                    &writer_tx2,
+                                    &ledger,
+                                    &tid2,
+                                    "task.error",
+                                    move |event_id| {
+                                        Message::TaskError(TaskError {
+                                            ts: protocol::now_utc(),
+                                            event_id: Some(event_id),
+                                            req_id: rid,
+                                            agent_id: aid,
+                                            task_id: tid,
+                                            error_taxonomy: taxonomy.clone(),
+                                            detail,
+                                        })
+                                    },
+                                )
+                                .await;
                                 break;
                             }
                             GateAction::SwitchAgent {

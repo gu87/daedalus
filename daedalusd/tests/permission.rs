@@ -40,7 +40,7 @@ async fn fake_broker_approved() {
     };
     let tc = make_tool_call("bash");
     let result = broker
-        .request_permission("claude", "r1", &tc)
+        .request_permission("claude", "r1", &tc, "test-task")
         .await
         .unwrap();
     assert_eq!(result, PermissionDecision::Approved);
@@ -54,7 +54,7 @@ async fn fake_broker_denied() {
     };
     let tc = make_tool_call("bash");
     let result = broker
-        .request_permission("claude", "r2", &tc)
+        .request_permission("claude", "r2", &tc, "test-task")
         .await
         .unwrap();
     assert_eq!(result, PermissionDecision::Denied);
@@ -68,7 +68,7 @@ async fn fake_broker_ignores_req_id() {
         delay: None,
     };
     let tc = make_tool_call("bash");
-    let result = broker.request_permission("claude", "", &tc).await.unwrap();
+    let result = broker.request_permission("claude", "", &tc, "test-task").await.unwrap();
     assert_eq!(result, PermissionDecision::Approved);
 }
 
@@ -81,7 +81,7 @@ async fn ipc_broker_empty_req_id_error() {
     let broker = IpcPermissionBroker::new(state, tx, Duration::from_secs(30));
     let tc = make_tool_call("bash");
     let err = broker
-        .request_permission("claude", "", &tc)
+        .request_permission("claude", "", &tc, "test-task")
         .await
         .unwrap_err();
     assert_eq!(err.reason, ErrorKind::Cancelled);
@@ -100,7 +100,7 @@ async fn ipc_broker_approved_via_response() {
     // Spawn the broker request — it will block until we send a response.
     let handle = tokio::spawn(async move {
         broker
-            .request_permission("claude", "req-approved", &tc)
+            .request_permission("claude", "req-approved", &tc, "test-task")
             .await
     });
 
@@ -139,7 +139,7 @@ async fn ipc_broker_denied_via_response() {
     let tc = make_tool_call("bash");
 
     let handle =
-        tokio::spawn(async move { broker.request_permission("claude", "req-denied", &tc).await });
+        tokio::spawn(async move { broker.request_permission("claude", "req-denied", &tc, "test-task").await });
 
     let msg = rx
         .recv()
@@ -169,7 +169,7 @@ async fn ipc_broker_timeout_returns_denied() {
     let tc = make_tool_call("bash");
 
     let result = broker
-        .request_permission("claude", "req-timeout", &tc)
+        .request_permission("claude", "req-timeout", &tc, "test-task")
         .await
         .unwrap();
     // Timeout → Denied (security-first).
@@ -187,7 +187,7 @@ async fn ipc_broker_drain_pending_returns_cancelled() {
 
     // Spawn broker — it sends permission.request and waits.
     let handle =
-        tokio::spawn(async move { broker.request_permission("claude", "req-drain", &tc).await });
+        tokio::spawn(async move { broker.request_permission("claude", "req-drain", &tc, "test-task").await });
 
     // Give the broker time to send the request and enter wait.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -215,7 +215,7 @@ async fn ipc_broker_send_failure_returns_cancelled() {
     let tc = make_tool_call("bash");
 
     let err = broker
-        .request_permission("claude", "req-send-fail", &tc)
+        .request_permission("claude", "req-send-fail", &tc, "test-task")
         .await
         .unwrap_err();
     assert_eq!(err.reason, ErrorKind::Cancelled);
@@ -234,7 +234,7 @@ async fn ipc_broker_shutdown_returns_cancelled() {
     let tc = make_tool_call("bash");
 
     let err = broker
-        .request_permission("claude", "req-shutdown", &tc)
+        .request_permission("claude", "req-shutdown", &tc, "test-task")
         .await
         .unwrap_err();
     assert_eq!(err.reason, ErrorKind::Cancelled);
@@ -251,7 +251,7 @@ async fn no_pending_leak_after_response() {
 
     let handle = tokio::spawn(async move {
         broker
-            .request_permission("claude", "req-no-leak", &tc)
+            .request_permission("claude", "req-no-leak", &tc, "test-task")
             .await
     });
 
@@ -292,7 +292,7 @@ async fn no_pending_leak_after_timeout() {
     let tc = make_tool_call("bash");
 
     let _ = broker
-        .request_permission("claude", "req-timeout-leak", &tc)
+        .request_permission("claude", "req-timeout-leak", &tc, "test-task")
         .await;
 
     // After timeout: pending map is empty.
@@ -310,7 +310,7 @@ async fn no_pending_leak_after_send_failure() {
     let tc = make_tool_call("bash");
 
     let _ = broker
-        .request_permission("claude", "req-send-leak", &tc)
+        .request_permission("claude", "req-send-leak", &tc, "test-task")
         .await;
 
     // After send failure: pending map is empty.
