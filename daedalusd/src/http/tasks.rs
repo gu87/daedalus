@@ -11,6 +11,15 @@ use crate::db::registry::{self, AgentRunStatus, ListRunsFilter};
 
 use super::health::HttpState;
 
+// ── helpers ───────────────────────────────────────────────────────────
+
+/// P4.2: open the database read-only.
+/// Does NOT create a missing file or modify anything.
+fn open_db_readonly(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("db open: {e}"))
+}
+
 // ── query params ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -93,7 +102,7 @@ pub(crate) async fn list_tasks(
 
     let db_path = state.db_path.clone();
     let tasks = tokio::task::spawn_blocking(move || {
-        let conn = crate::db::pool::open(&db_path).map_err(|e| format!("db open: {e}"))?;
+        let conn = open_db_readonly(&db_path)?;
         registry::list_runs(&conn, &filter).map_err(|e| format!("list_runs: {e}"))
     })
     .await
@@ -132,7 +141,7 @@ pub(crate) async fn get_task(
     let db_path = state.db_path.clone();
     let rid = run_id.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = crate::db::pool::open(&db_path).map_err(|e| format!("db open: {e}"))?;
+        let conn = open_db_readonly(&db_path)?;
         registry::get_run(&conn, &rid).map_err(|e| format!("get_run: {e}"))
     })
     .await

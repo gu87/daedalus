@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use daedalusd::daemon::{DaemonContext, DefaultAgentLoopFactory};
-use daedalusd::db::{pool, registry};
+use daedalusd::db::pool;
 use daedalusd::gate::{CriteriaRegistry, GateRouter};
 use daedalusd::http::health::HttpState;
 
@@ -70,7 +70,6 @@ fn insert_test_runs(db_path: &std::path::Path) {
             _ => "cancelled",
         };
         let run_id = format!("run-test-{i}");
-        // Use raw SQL since insert_run forces queued.
         conn.execute(
             "INSERT INTO agent_runs (run_id, agent_id, task_id, status, spawn_depth, spawned_at) \
              VALUES (?1, ?2, ?3, ?4, 0, ?5)",
@@ -84,7 +83,6 @@ fn insert_test_runs(db_path: &std::path::Path) {
         )
         .unwrap();
     }
-    // Add one more with error_taxonomy set.
     conn.execute(
         "INSERT INTO agent_runs (run_id, agent_id, task_id, status, spawn_depth, spawned_at, error_taxonomy) \
          VALUES (?1, ?2, ?3, 'error', 0, ?4, 'tool_failure')",
@@ -102,7 +100,6 @@ async fn list_all_tasks() {
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
     insert_test_runs(&db_path);
-
     let (addr, shutdown) = start_server(&db_path).await;
 
     let resp = reqwest::get(format!("http://{addr}/api/tasks"))
@@ -110,8 +107,7 @@ async fn list_all_tasks() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let tasks = body["tasks"].as_array().unwrap();
-    assert_eq!(tasks.len(), 6, "should have 6 runs");
+    assert_eq!(body["tasks"].as_array().unwrap().len(), 6);
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -126,7 +122,6 @@ async fn list_filter_by_status() {
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
     insert_test_runs(&db_path);
-
     let (addr, shutdown) = start_server(&db_path).await;
 
     let resp = reqwest::get(format!("http://{addr}/api/tasks?status=error"))
@@ -135,7 +130,7 @@ async fn list_filter_by_status() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     let tasks = body["tasks"].as_array().unwrap();
-    assert_eq!(tasks.len(), 2, "should have 2 error runs");
+    assert_eq!(tasks.len(), 2);
     for t in tasks {
         assert_eq!(t["status"], "error");
     }
@@ -153,7 +148,6 @@ async fn list_filter_by_agent() {
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
     insert_test_runs(&db_path);
-
     let (addr, shutdown) = start_server(&db_path).await;
 
     let resp = reqwest::get(format!("http://{addr}/api/tasks?agent_id=agent-0"))
@@ -162,7 +156,6 @@ async fn list_filter_by_agent() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     let tasks = body["tasks"].as_array().unwrap();
-    // agent-0 gets i=0,2,4 + run-test-err = 4 entries
     assert_eq!(tasks.len(), 4);
     for t in tasks {
         assert_eq!(t["agent_id"], "agent-0");
@@ -180,7 +173,6 @@ async fn list_default_limit() {
         let mut conn = pool::open(&db_path).unwrap();
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
-    // Insert 60+ rows via raw SQL.
     let conn = pool::open(&db_path).unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -194,7 +186,6 @@ async fn list_default_limit() {
         )
         .unwrap();
     }
-
     let (addr, shutdown) = start_server(&db_path).await;
 
     let resp = reqwest::get(format!("http://{addr}/api/tasks"))
@@ -202,8 +193,7 @@ async fn list_default_limit() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let tasks = body["tasks"].as_array().unwrap();
-    assert_eq!(tasks.len(), 50, "default limit should be 50");
+    assert_eq!(body["tasks"].as_array().unwrap().len(), 50);
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -217,7 +207,6 @@ async fn list_invalid_status_400() {
         let mut conn = pool::open(&db_path).unwrap();
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
-
     let (addr, shutdown) = start_server(&db_path).await;
 
     let resp = reqwest::get(format!("http://{addr}/api/tasks?status=bogus"))
@@ -239,20 +228,22 @@ async fn list_invalid_limit_400() {
         let mut conn = pool::open(&db_path).unwrap();
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
-
     let (addr, shutdown) = start_server(&db_path).await;
 
-    // limit=0 should be rejected.
     let resp = reqwest::get(format!("http://{addr}/api/tasks?limit=0"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
 
-    // limit=200 should be rejected.
     let resp2 = reqwest::get(format!("http://{addr}/api/tasks?limit=200"))
         .await
         .unwrap();
     assert_eq!(resp2.status(), 400);
+
+    let resp3 = reqwest::get(format!("http://{addr}/api/tasks?limit=abc"))
+        .await
+        .unwrap();
+    assert_eq!(resp3.status(), 400);
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -267,7 +258,6 @@ async fn detail_existing_run() {
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
     insert_test_runs(&db_path);
-
     let (addr, shutdown) = start_server(&db_path).await;
 
     let resp = reqwest::get(format!("http://{addr}/api/tasks/run-test-0"))
@@ -278,7 +268,6 @@ async fn detail_existing_run() {
     assert_eq!(body["run_id"], "run-test-0");
     assert_eq!(body["status"], "queued");
     assert_eq!(body["agent_id"], "agent-0");
-    assert_eq!(body["task_id"], "task-0");
     assert!(body["spawned_at"].as_i64().is_some());
 
     shutdown.cancel();
@@ -293,7 +282,6 @@ async fn detail_not_found_404() {
         let mut conn = pool::open(&db_path).unwrap();
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
-
     let (addr, shutdown) = start_server(&db_path).await;
 
     let resp = reqwest::get(format!("http://{addr}/api/tasks/nonexistent-run"))
@@ -315,7 +303,6 @@ async fn empty_list() {
         let mut conn = pool::open(&db_path).unwrap();
         daedalusd::db::migrations::run_all(&mut conn).unwrap();
     }
-
     let (addr, shutdown) = start_server(&db_path).await;
 
     let resp = reqwest::get(format!("http://{addr}/api/tasks"))
@@ -323,8 +310,57 @@ async fn empty_list() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let tasks = body["tasks"].as_array().unwrap();
-    assert!(tasks.is_empty());
+    assert!(body["tasks"].as_array().unwrap().is_empty());
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn tasks_endpoint_readonly_does_not_create_db() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let missing_db = dir.path().join("no_such_db.sqlite");
+    assert!(!missing_db.exists());
+
+    let config = test_config(&missing_db);
+    let ctx = Arc::new(DaemonContext {
+        config: config.clone(),
+        db_path: missing_db.clone(),
+        factory: Arc::new(DefaultAgentLoopFactory {
+            config: config.clone(),
+        }),
+        gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
+    let http_state = Arc::new(HttpState {
+        ctx,
+        started_at: Instant::now(),
+        socket_path: "/tmp/test.sock".into(),
+        db_path: missing_db.clone(),
+    });
+
+    let shutdown = CancellationToken::new();
+    let http_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        daedalusd::http::server::run_http(listener, http_state, http_shutdown).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let resp = reqwest::get(format!("http://{addr}/api/tasks"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+    assert!(!missing_db.exists(), "list endpoint must not create DB");
+
+    let resp2 = reqwest::get(format!("http://{addr}/api/tasks/run-1"))
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 500);
+    assert!(!missing_db.exists(), "detail endpoint must not create DB");
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;

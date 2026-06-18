@@ -288,6 +288,8 @@ pub struct ListRunEntry {
 /// Return matching runs, newest first with stable tie-breaker.
 ///
 /// Query is parameterised — no string interpolation.
+/// `filter.limit` is expected to be pre-validated (1..=100) by the caller;
+/// this function applies an additional hard cap of 100 as a safety net.
 pub fn list_runs(conn: &Connection, filter: &ListRunsFilter) -> Result<Vec<ListRunEntry>> {
     let limit = filter.limit.min(100) as i64;
 
