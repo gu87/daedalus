@@ -13,15 +13,25 @@ TMP_DIR=$(mktemp -d /tmp/smoke-phase4-XXXXXX)
 SOCK_PATH="$TMP_DIR/daedalusd.sock"
 STATE_DIR="$TMP_DIR/state"
 MODELS_YAML="$TMP_DIR/models.yaml"
-HTTP_PORT=19800
-MOCK_PORT=19801
+
+# P4.6 fixup: dynamic ports to avoid conflicts.
+HTTP_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+MOCK_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+
+# P4.6 fixup: guard cleanup for unset PIDs under set -u.
+DAEMON_PID=""
+MOCK_PID=""
 
 cleanup() {
   echo "--- cleaning up ---"
-  kill "$DAEMON_PID" 2>/dev/null || true
-  wait "$DAEMON_PID" 2>/dev/null || true
-  kill "$MOCK_PID" 2>/dev/null || true
-  wait "$MOCK_PID" 2>/dev/null || true
+  if [ -n "${DAEMON_PID:-}" ]; then
+    kill "$DAEMON_PID" 2>/dev/null || true
+    wait "$DAEMON_PID" 2>/dev/null || true
+  fi
+  if [ -n "${MOCK_PID:-}" ]; then
+    kill "$MOCK_PID" 2>/dev/null || true
+    wait "$MOCK_PID" 2>/dev/null || true
+  fi
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT

@@ -64,6 +64,15 @@ cd daedalus-desktop && npm run build     ✅
 
 ---
 
-## 4. 返回 Codex 复审
+## 4. 返修记录
 
-P4.6 验收完毕。请 Codex 审查。
+| # | 问题 | 修复 |
+|---|------|------|
+| 1 | 固定端口 HTTP_PORT=19800/MOCK_PORT=19801 易冲突 | 改用 `python3 socket bind(0)` 动态获取空闲端口 |
+| 2 | `set -u` 下 cleanup 引用未赋值 PID 变量 | 初始化 `DAEMON_PID=""` / `MOCK_PID=""`；cleanup 中 `-n` 判断非空再 kill/wait |
+
+---
+
+## 5. 返回 Codex 复审
+
+P4.6 返修完毕，smoke ALL PASSED。请 Codex 审查。
