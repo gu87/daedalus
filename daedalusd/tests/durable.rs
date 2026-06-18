@@ -667,7 +667,7 @@ async fn session_rejoin_rejects_mismatched_task_id() {
     let resp = rx.try_recv().expect("should get error");
     match resp {
         Message::SystemError(e) => {
-            assert!(e.detail.contains("does not match task_id"));
+            assert!(e.detail.contains("!=") && e.detail.contains("task_id"));
         }
         other => panic!("expected SystemError, got {other:?}"),
     }

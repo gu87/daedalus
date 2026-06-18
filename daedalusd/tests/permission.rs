@@ -88,6 +88,7 @@ async fn fake_broker_ignores_req_id() {
 
 #[tokio::test]
 async fn ipc_broker_empty_req_id_error() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, _rx) = fake_writer_tx();
     let broker = IpcPermissionBroker::new(state, tx, make_ledger(&dir), Duration::from_secs(30));
@@ -104,6 +105,7 @@ async fn ipc_broker_empty_req_id_error() {
 
 #[tokio::test]
 async fn ipc_broker_approved_via_response() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, mut rx) = fake_writer_tx();
     let broker = IpcPermissionBroker::new(
@@ -150,6 +152,7 @@ async fn ipc_broker_approved_via_response() {
 
 #[tokio::test]
 async fn ipc_broker_denied_via_response() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, mut rx) = fake_writer_tx();
     let broker = IpcPermissionBroker::new(
@@ -188,6 +191,7 @@ async fn ipc_broker_denied_via_response() {
 
 #[tokio::test]
 async fn ipc_broker_timeout_returns_denied() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, _rx) = fake_writer_tx();
     let broker = IpcPermissionBroker::new(state, tx, make_ledger(&dir), Duration::from_millis(50));
@@ -205,6 +209,7 @@ async fn ipc_broker_timeout_returns_denied() {
 
 #[tokio::test]
 async fn ipc_broker_drain_pending_returns_cancelled() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, _rx) = fake_writer_tx();
     let broker = IpcPermissionBroker::new(
@@ -239,6 +244,7 @@ async fn ipc_broker_drain_pending_returns_cancelled() {
 
 #[tokio::test]
 async fn ipc_broker_send_failure_returns_cancelled() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, rx) = fake_writer_tx();
     // Drop rx immediately so send fails.
@@ -259,6 +265,7 @@ async fn ipc_broker_send_failure_returns_cancelled() {
 
 #[tokio::test]
 async fn ipc_broker_shutdown_returns_cancelled() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     state.shutdown.cancel(); // shutdown before request
 
@@ -277,6 +284,7 @@ async fn ipc_broker_shutdown_returns_cancelled() {
 
 #[tokio::test]
 async fn no_pending_leak_after_response() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, mut rx) = fake_writer_tx();
     let broker = IpcPermissionBroker::new(
@@ -324,6 +332,7 @@ async fn no_pending_leak_after_response() {
 
 #[tokio::test]
 async fn no_pending_leak_after_timeout() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, _rx) = fake_writer_tx();
     let broker = IpcPermissionBroker::new(
@@ -345,6 +354,7 @@ async fn no_pending_leak_after_timeout() {
 
 #[tokio::test]
 async fn no_pending_leak_after_send_failure() {
+    let dir = tempfile::TempDir::new().unwrap();
     let state = make_state();
     let (tx, rx) = fake_writer_tx();
     drop(rx);
