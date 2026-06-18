@@ -1,7 +1,7 @@
 # P5.1 实现完成报告：DAEDALUS.md 项目指令源
 
 > Memory Layer 最后一块。其他 7 个 Provider 已在 P3.1a/P3.1b 接入。
-> commits: `07fb756`, fixup: `72de9ac`, fixup: `e9f3a42`
+> commits: `07fb756`, fixups: `72de9ac`, `d790b6f`
 
 ---
 
