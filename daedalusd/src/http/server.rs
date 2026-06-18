@@ -10,6 +10,7 @@ use axum::Router;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use super::config;
 use super::health::{self, HttpState};
 use super::tasks;
 
@@ -24,6 +25,7 @@ pub async fn run_http(listener: TcpListener, state: Arc<HttpState>, shutdown: Ca
         .route("/api/health", get(health::health))
         .route("/api/tasks", get(tasks::list_tasks))
         .route("/api/tasks/:run_id", get(tasks::get_task))
+        .route("/api/config/models", get(config::list_models))
         .with_state(state);
 
     axum::serve(listener, app)

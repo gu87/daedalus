@@ -1,114 +1,57 @@
-# P4.3 修订方案：daedalus-desktop Electron React UI Skeleton 收口
+# P4.4 实现完成报告：配置诊断 + 模型摘要 API
 
-> 原 P4.3 计划为"单 HTML cc-haha 管理前端"。
-> UI Skeleton 合并（commit `6dc9cd4`）后，前端形态已升级为 Electron + React + TypeScript 桌面项目。
-> P4.3 修订为 **daedalus-desktop 收口任务**：确认边界、记录状态、不接真实后端。
-
----
-
-## 1. 背景
-
-原 P4.3 目标：daedalusd HTTP server serving 单 HTML 仪表盘（`GET /`）。
-
-UI Skeleton 合并后现状：
-- `daedalus-desktop/` 是独立 Electron + Vite + React 19 + TypeScript 项目
-- 拥有完整的左中右三栏布局、工作 Tab、工具 Tab、Gate 审批条
-- 三种核心视图（对话/会议/任务执行）均使用 mock data
-- 零真实后端接入，零 IPC 接入
-
-修订后的 P4.3 定位为**前端主线收口**：不再另外实现 cc-haha 单 HTML 仪表盘。
-daedalus-desktop 是 Phase 4 及后续所有前端功能的统一载体。
+> 基于 P4.2（commit `60703ce`）。不做 Router 热替换。
+> (1) 证明 `AgentLoop::new()` 每次 build 读最新 models.yaml；
+> (2) 新增 `GET /api/config/models`。
 
 ---
 
-## 2. 已完成 commit
+## 1. 修改文件清单（6 个）
 
-| Commit | 内容 |
-|--------|------|
-| `6dc9cd4` | UI Skeleton 合并 + Electron wrapper + mock preload |
-| `75d7df6` | 合并完成报告 |
-| `a21b0df` | 返修：commit 说明修正 + Vite loopback 收紧 |
+| 文件 | 操作 | 变更摘要 |
+|------|:---:|------|
+| `daedalusd/src/http/config.rs` | **新增** | `GET /api/config/models` handler（provider 不存在 → 500，YAML 错误 → 500，文件缺失 → []） |
+| `daedalusd/src/http/mod.rs` | 修改 | + `pub mod config` |
+| `daedalusd/src/http/server.rs` | 修改 | 注册 `/api/config/models` 路由 |
+| `daedalusd/tests/config_reload.rs` | **新增** | 1 个 reload 证明测试（生产路径：AgentLoop::new） |
+| `daedalusd/tests/http_config.rs` | **新增** | 5 个 HTTP 集成测试 |
+
+**未改**：main.rs、daemon.rs、health.rs、tasks.rs、registry.rs、Router、IPC、schema、Gate
 
 ---
 
-## 3. 文件边界（P4.3 涉及）
+## 2. 核心行为
+
+### 2.1 `/api/config/models`
+
+- 文件存在且合法 → 200 + 模型列表（id / provider / type 三个字段）
+- 文件不存在 → 200 + `{ "models": [] }`
+- YAML 语法错误 → 500
+- 模型引用不存在的 provider → 500
+- 绝不返回 `api_key_env` / `base_url` / `model_id`
+
+### 2.2 reload 证明
+
+第一次 `AgentLoop::new()`：models.yaml 指向不存在 provider → Err
+修改 models.yaml 为合法 → 第二次 `AgentLoop::new()` → Ok
+
+证明生产路径（`AgentLoop::new → Router::from_models_config → load_models_yaml`）天然读取最新磁盘文件。
+
+---
+
+## 3. 验证
 
 ```
-daedalus-desktop/
-├── electron/
-│   ├── main.js               # Electron 主进程（最小壳，不改）
-│   └── preload.js            # contextBridge → window.daedalusAPI（mock，不改）
-├── src/
-│   ├── App.tsx               # 根组件（全部 UI 状态用 React state）
-│   ├── styles.css            # 全局样式
-│   ├── components/           # AppShell / LeftSidebar / CenterTabs / Composer /
-│   │                           ApprovalBar / RightToolDrawer / MainContent / LeftRail
-│   ├── views/                # ChatView / ProjectView / EmptyView
-│   ├── data/mockData.ts      # Mock 工作区 + 标签
-│   ├── types/index.ts        # TypeScript 类型
-│   ├── utils/time.ts, view.ts
-│   └── services/
-│       └── daedalusApi.ts     # ★ IPC 接入层（当前 mock，后续只从这里改）
-├── package.json              # Electron + Vite + React 依赖
-├── vite.config.ts            # base: "./" 兼容 Electron file://
-└── tsconfig.json
+cargo fmt --all -- --check               ✅
+cargo test --test config_reload          ✅ 1 passed
+cargo test --test http_config            ✅ 5 passed
+cargo test --workspace                   ✅ 410 passed
+  -- --skip long_line_returns_error_and_closes
+cargo clippy --workspace -- -D warnings  ✅
 ```
 
-**不涉及的文件**：daedalusd/（Rust 后端）、daedalus-orch/（Python）、desktop-demo/（旧 JS demo）
-
 ---
 
-## 4. 已验证的 UI 交互
+## 4. 返回 Codex 复审
 
-| 功能 | 实现位置 | 确认方式 |
-|------|------|:---:|
-| 左侧展开 / 折叠 | App.tsx `leftCollapsed` + AppShell toggle | 源码审查 |
-| 右侧显示 / 隐藏 | App.tsx `rightCollapsed` | 源码审查 |
-| 中间工作 Tab（打开/切换/关闭） | App.tsx `openStarter` / `setActiveTabId` / `closeTab` | 源码审查 |
-| 右侧工具 Tab（多开/切换/关闭） | App.tsx `openRightTool` / `closeRightTool` | 源码审查 |
-| Gate 审批（approve/reject/changes） | ApprovalBar.tsx + App.tsx `decideApproval` | 源码审查 |
-| 新对话 / 会议室 / 新建任务 → 新 Tab | App.tsx `createGeneratedTab` | 源码审查 |
-| 构建 (`npm run build`) | tsc + vite → dist/ | ✅ 通过 |
-| 开发 (`npm run dev`) | Vite → 127.0.0.1:5173 | ✅ 通过 |
-
----
-
-## 5. 不做清单
-
-| 约束 | 状态 |
-|------|:---:|
-| 不接真实 daedalusd 后端 | ✅ |
-| 不接真实 Electron IPC | ✅ |
-| 不重新设计 UI | ✅ |
-| 不引入 Redux / Zustand（只用 React state） | ✅ |
-| 不修改 Electron main process 业务逻辑 | ✅ |
-| 不修改 Rust/Python 后端 | ✅ |
-| 不删除 desktop-demo/ | ✅ |
-| 不删除会议模式 / Gate 审批条 | ✅ |
-| 不把右侧做成详情页再返回 | ✅ |
-| 不把中间顶部做成固定功能 Tab | ✅ |
-| 不新增 HTTP API 端点 | ✅ |
-
----
-
-## 6. 后续真实 IPC 接入 TODO
-
-| # | 事项 | 目标文件 | 依赖 |
-|:--|------|------|:---:|
-| 1 | `window.daedalusAPI.listSessions()` → 真实 `GET /api/tasks` | `electron/preload.js` | P4.2 已完成 |
-| 2 | `window.daedalusAPI.getHealth()` → 真实 `GET /api/health` | `electron/preload.js` | P4.1 已完成 |
-| 3 | `window.daedalusAPI.approveGate/rejectGate/requestChanges` → 真实 IPC permission response | `electron/preload.js` | daemon IPC 已有 |
-| 4 | `daedalusApi.ts` 从 mock 改为调用 `window.daedalusAPI` | `src/services/daedalusApi.ts` | 1-3 |
-| 5 | `App.tsx` 从 mock state 改为通过 `daedalusApi` 获取/更新数据 | `src/App.tsx` | 4 |
-| 6 | 实时事件流 `subscribeEvents` → daedalusd event stream | `electron/preload.js` + `daedalusApi.ts` | daemon IPC |
-| 7 | Electron 打包签名 / auto-update | `electron-builder.yml` | 1-6 稳定后 |
-
----
-
-## 7. 与后续 P4.4–P4.6 的关系
-
-| 后续任务 | 影响 daedalus-desktop？ |
-|------|:---:|
-| P4.4 配置诊断 + 模型摘要 API | 否（纯后端） |
-| P4.5 模型连通性探测 API | 否（纯后端） |
-| P4.6 Phase 4 验收收口 | 是（需确认 Electron app 可加载 + daedalusd HTTP API 可用） |
+P4.4 实现完毕。请 Codex 审查。
