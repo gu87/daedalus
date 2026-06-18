@@ -20,6 +20,7 @@ fn test_config(db_path: &std::path::Path) -> daedalusd::config::DaedalusConfig {
         db_path: Some(db_path.to_path_buf()),
         gate_criteria_path: "/nonexistent/gate.yaml".into(),
         http_addr: "127.0.0.1:0".into(),
+        daedalus_md_path: "DAEDALUS.md".into(),
     }
 }
 

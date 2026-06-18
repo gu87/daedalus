@@ -187,6 +187,7 @@ fn setup_config(dir: &tempfile::TempDir) -> DaedalusConfig {
         db_path: None,
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
+        daedalus_md_path: "DAEDALUS.md".into(),
     }
 }
 

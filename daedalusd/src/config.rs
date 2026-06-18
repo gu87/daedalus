@@ -131,6 +131,8 @@ pub struct DaedalusConfig {
     pub gate_criteria_path: String,
     /// P4.1: HTTP listen address.  Must be a loopback address.
     pub http_addr: String,
+    /// P5.1: path to DAEDALUS.md project-level instructions.
+    pub daedalus_md_path: String,
 }
 
 impl DaedalusConfig {
@@ -150,6 +152,8 @@ impl DaedalusConfig {
                 .unwrap_or_else(|_| format!("{home}/.daedalus/config/gate-criteria.yaml")),
             http_addr: std::env::var("DAEDALUSD_HTTP_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:9800".to_string()),
+            daedalus_md_path: std::env::var("DAEDALUS_MD_PATH")
+                .unwrap_or_else(|_| "DAEDALUS.md".to_string()),
         }
     }
 
@@ -247,6 +251,7 @@ mod tests {
             db_path: None,
             gate_criteria_path: "/tmp/gate.yaml".into(),
             http_addr: "127.0.0.1:9800".into(),
+            daedalus_md_path: "DAEDALUS.md".into(),
         }
     }
 }

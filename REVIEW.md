@@ -1,80 +1,67 @@
-# Phase 4 最终审计报告
+# P5.1 实现完成报告：DAEDALUS.md 项目指令源
 
-> 审计时间：2026-06-19
-> HEAD: `022fd49`
-
----
-
-## 0. 审计结论
-
-**Phase 4 全部通过。** 6 个子任务全部 [DONE]，415 测试通过，smoke 全链路验收通过。
+> Memory Layer 最后一块。其他 7 个 Provider 已在 P3.1a/P3.1b 接入。
+> P5.1 只新增 DAEDALUS.md。
 
 ---
 
-## 1. 子任务汇总
+## 1. 修改文件清单（6 个）
 
-| # | 子任务 | Commit(s) | 核心交付 |
-|:--|--------|-----------|---------|
-| P4.1 | HTTP API 骨架 + 健康检查 | `5112720`, `7f922cb` | axum server, `GET /api/health`, HttpState, loopback-only |
-| P4.2 | Task 可观测性 API | `36f688b`, `60703ce` | `GET /api/tasks`, `GET /api/tasks/:run_id`, `list_runs()` |
-| P4.3 | daedalus-desktop UI Skeleton 收口 | `6dc9cd4`, `75d7df6`, `a21b0df` | Electron + React + TS 桌面项目，mock UI |
-| P4.4 | 配置诊断 + 模型摘要 API | `168eb23` | `GET /api/config/models`, reload 证明测试 |
-| P4.5 | 模型连通性探测 API | `af9074b`, `c03947a` | `POST /api/models/validate`, Router 生产路径 |
-| P4.6 | Phase 4 验收收口 | `5a82554`, `a877ac7` | smoke 脚本, README 更新, 范围审计 |
+| 文件 | 操作 | 变更摘要 |
+|------|:---:|------|
+| `DAEDALUS.md` | **新增** | 项目根目录，项目级 Agent 指令模板 |
+| `daedalusd/src/config.rs` | 修改 | DaedalusConfig + `daedalus_md_path`（env `DAEDALUS_MD_PATH`，默认 `./DAEDALUS.md`） |
+| `daedalusd/src/agent/prompt_sources.rs` | 修改 | 新增 `DaedalusMdProvider`（`read_optional`，silent skip） |
+| `daedalusd/src/agent/prompt.rs` | 修改 | PromptBuilder chain 插入 DaedalusMdProvider（soul 之后、memory 之前） |
+| `daedalusd/tests/prompt.rs` | 修改 | +3 测试：链顺序、缺失 skip、自定义路径；+ 手动链补 DaedalusMdProvider |
+| 10 个测试文件 | 修改 | DaedalusConfig struct literal 补齐 `daedalus_md_path` |
 
----
-
-## 2. HTTP API 端点总览
-
-| 方法 | 路径 | 状态 | P4 |
-|------|------|:---:|:---:|
-| GET | `/api/health` | ✅ | P4.1 |
-| GET | `/api/tasks` | ✅ | P4.2 |
-| GET | `/api/tasks/:run_id` | ✅ | P4.2 |
-| GET | `/api/config/models` | ✅ | P4.4 |
-| POST | `/api/models/validate` | ✅ | P4.5 |
+**未改**：IPC、schema、Gate、Agent Loop、daemon、HTTP
 
 ---
 
-## 3. 验证结果
+## 2. 核心行为
+
+### Provider chain 顺序
+
+```
+[soul] → [daedalus] → [memory] → [user] → [prefs] → [agent]
+→ [feedback] → [project] → [authority] → [history] → [skills]
+```
+
+### Silent skip
+
+- DAEDALUS.md 不存在 → `read_optional` 返回 `None` → `[daedalus]` 段不注入
+- DAEDALUS.md 存在但为空 → 同 None
+- 不报错，不影响其他 provider
+
+### Env override
+
+- `DAEDALUS_MD_PATH` 环境变量覆盖默认路径 `./DAEDALUS.md`
+- 自定义路径测试通过 `DaedalusConfig.daedalus_md_path` 直接构造
+
+---
+
+## 3. 验证
 
 ```
 cargo fmt --all -- --check               ✅
-cargo test --workspace                   ✅ 415 passed, 0 failed, 1 skipped
+cargo test --test prompt                 ✅ 38 passed (+3 P5.1)
+cargo test --workspace                   ✅ 418 passed
   -- --skip long_line_returns_error_and_closes
 cargo clippy --workspace -- -D warnings  ✅
-scripts/smoke-phase4.sh                  ✅ ALL PASSED
-cd daedalus-desktop && npm run build     ✅
 ```
 
----
+### 新增测试（3 个）
 
-## 4. 不做清单（Phase 4 全程遵守）
-
-| 约束 | 状态 |
-|------|:---:|
-| Router 热替换（Arc<RwLock>） | ✅ |
-| notify watcher | ✅ |
-| DaemonContext 重构 | ✅ |
-| IPC 协议修改 | ✅ |
-| SQLite schema 修改 | ✅ |
-| Gate / Agent Loop 修改 | ✅ |
-| 认证 / HTTPS | ✅ |
-| 凭证热刷新 | ✅ |
-| Gemini / Cohere Provider | ✅ |
-| daedalus-desktop 真实 IPC | ✅ |
-| system.ack / event replay / pipeline / Omega | ✅ |
+| # | 测试 | 断言 |
+|:--|------|------|
+| 1 | `prompt_builder_new_includes_daedalus_between_soul_and_memory` | [soul] < [daedalus] < [memory] |
+| 2 | `daedalus_md_missing_silent_skip` | 文件缺失 → prompt 不含 [daedalus]，不报错 |
+| 3 | `daedalus_md_custom_path` | 自定义路径正确注入内容 |
 
 ---
 
-## 5. 已知预存问题
+## 4. 返回 Codex 复审
 
-| 问题 | 状态 |
-|------|:---:|
-| `ipc::server::tests::long_line_returns_error_and_closes` skip | 预存（自 P2.5），Phase 4 未引入/未修复 |
-
----
-
-## 6. 返回 Codex 最终确认
-
-Phase 4 审计完毕。
+P5.1 实现完毕，418 测试全过。请 Codex 审查。

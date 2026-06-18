@@ -36,6 +36,10 @@ impl PromptBuilder {
 
         let mut providers: Vec<Box<dyn prompt_sources::SourceProvider>> = vec![
             Box::new(prompt_sources::SoulProvider::new(&config.soul_path)),
+            // P5.1: DAEDALUS.md between [soul] and [memory].
+            Box::new(prompt_sources::DaedalusMdProvider::new(
+                &config.daedalus_md_path,
+            )),
             Box::new(prompt_sources::MemoryProvider::new(&mp.memory_md)),
             Box::new(prompt_sources::UserProvider::new(&mp.user_md)),
             Box::new(prompt_sources::PreferencesProvider::new(&mp.preferences)),

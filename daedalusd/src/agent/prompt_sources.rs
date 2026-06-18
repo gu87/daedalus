@@ -239,6 +239,32 @@ impl SourceProvider for SoulProvider {
     }
 }
 
+// ── DaedalusMdProvider ─────────────────────────────────────────────
+
+/// P5.1: project-level instructions from DAEDALUS.md.
+/// Silent skip if the file is missing or empty.
+pub struct DaedalusMdProvider {
+    path: String,
+}
+
+impl DaedalusMdProvider {
+    pub fn new(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+        }
+    }
+}
+
+impl SourceProvider for DaedalusMdProvider {
+    fn label(&self) -> &str {
+        "daedalus"
+    }
+
+    fn provide(&self, _agent_id: &str, _task: &TaskCard) -> Result<Option<String>, DaedalusError> {
+        read_optional(&self.path, "DAEDALUS.md")
+    }
+}
+
 // ── AgentConfigProvider ───────────────────────────────────────────────
 
 pub struct AgentConfigProvider {
