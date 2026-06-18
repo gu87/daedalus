@@ -1,105 +1,114 @@
-# UI Skeleton 合并完成报告：daedalus-desktop
+# P4.3 修订方案：daedalus-desktop Electron React UI Skeleton 收口
 
-> 将 `daedalus_react_ui_skeleton.zip` 合并为 `daedalus-desktop/` Electron + React + TypeScript 桌面项目。
-> UI 代码 commit: `6dc9cd4`，报告 commit: `75d7df6`
-
----
-
-## 1. 目标达成
-
-- ✅ Skeleton UI 完整合并进 `daedalus-desktop/`
-- ✅ Electron 主进程 + preload 桥接层
-- ✅ Vite + React 19 + TypeScript 构建链路
-- ✅ 零真实后端接入（纯 mock data）
-- ✅ 不改 daedalusd 后端、不改 desktop-demo/
+> 原 P4.3 计划为"单 HTML cc-haha 管理前端"。
+> UI Skeleton 合并（commit `6dc9cd4`）后，前端形态已升级为 Electron + React + TypeScript 桌面项目。
+> P4.3 修订为 **daedalus-desktop 收口任务**：确认边界、记录状态、不接真实后端。
 
 ---
 
-## 2. 项目结构
+## 1. 背景
+
+原 P4.3 目标：daedalusd HTTP server serving 单 HTML 仪表盘（`GET /`）。
+
+UI Skeleton 合并后现状：
+- `daedalus-desktop/` 是独立 Electron + Vite + React 19 + TypeScript 项目
+- 拥有完整的左中右三栏布局、工作 Tab、工具 Tab、Gate 审批条
+- 三种核心视图（对话/会议/任务执行）均使用 mock data
+- 零真实后端接入，零 IPC 接入
+
+修订后的 P4.3 定位为**前端主线收口**：不再另外实现 cc-haha 单 HTML 仪表盘。
+daedalus-desktop 是 Phase 4 及后续所有前端功能的统一载体。
+
+---
+
+## 2. 已完成 commit
+
+| Commit | 内容 |
+|--------|------|
+| `6dc9cd4` | UI Skeleton 合并 + Electron wrapper + mock preload |
+| `75d7df6` | 合并完成报告 |
+| `a21b0df` | 返修：commit 说明修正 + Vite loopback 收紧 |
+
+---
+
+## 3. 文件边界（P4.3 涉及）
 
 ```
 daedalus-desktop/
 ├── electron/
-│   ├── main.js          # Electron 主进程（最小壳）
-│   └── preload.js       # contextBridge → window.daedalusAPI（mock）
+│   ├── main.js               # Electron 主进程（最小壳，不改）
+│   └── preload.js            # contextBridge → window.daedalusAPI（mock，不改）
 ├── src/
-│   ├── main.tsx         # React 入口
-│   ├── App.tsx          # 根组件（全部 UI 状态管理）
-│   ├── styles.css       # 全局样式
-│   ├── components/      # AppShell, LeftSidebar, CenterTabs, Composer,
-│   │                      ApprovalBar, RightToolDrawer, MainContent,
-│   │                      LeftRail
-│   ├── views/           # ChatView, ProjectView, EmptyView
-│   ├── data/mockData.ts # Mock 工作区 + 标签数据
-│   ├── types/index.ts   # TypeScript 类型定义
-│   ├── utils/           # time.ts, view.ts
+│   ├── App.tsx               # 根组件（全部 UI 状态用 React state）
+│   ├── styles.css            # 全局样式
+│   ├── components/           # AppShell / LeftSidebar / CenterTabs / Composer /
+│   │                           ApprovalBar / RightToolDrawer / MainContent / LeftRail
+│   ├── views/                # ChatView / ProjectView / EmptyView
+│   ├── data/mockData.ts      # Mock 工作区 + 标签
+│   ├── types/index.ts        # TypeScript 类型
+│   ├── utils/time.ts, view.ts
 │   └── services/
-│       └── daedalusApi.ts # ★ 预留 IPC 接入层（后续只从这里接真实后端）
-├── package.json         # Electron + Vite + React 依赖
-├── vite.config.ts       # base: "./" 兼容 Electron file://
-├── tsconfig.json
-├── electron-builder.yml # 打包配置
-└── .gitignore
+│       └── daedalusApi.ts     # ★ IPC 接入层（当前 mock，后续只从这里改）
+├── package.json              # Electron + Vite + React 依赖
+├── vite.config.ts            # base: "./" 兼容 Electron file://
+└── tsconfig.json
 ```
 
-## 3. 修改的文件
+**不涉及的文件**：daedalusd/（Rust 后端）、daedalus-orch/（Python）、desktop-demo/（旧 JS demo）
 
-| 类型 | 文件 | 说明 |
-|------|------|------|
-| 新增 | `daedalus-desktop/` (31 文件) | 完整桌面项目 |
-| 修改 | `.gitignore` | + node_modules/ dist/ release/ |
-| 未改 | `daedalusd/` `daedalus-orch/` `desktop-demo/` | 后端和旧 demo 完全不动 |
+---
 
-## 4. 如何启动
+## 4. 已验证的 UI 交互
 
-```bash
-cd daedalus-desktop/
+| 功能 | 实现位置 | 确认方式 |
+|------|------|:---:|
+| 左侧展开 / 折叠 | App.tsx `leftCollapsed` + AppShell toggle | 源码审查 |
+| 右侧显示 / 隐藏 | App.tsx `rightCollapsed` | 源码审查 |
+| 中间工作 Tab（打开/切换/关闭） | App.tsx `openStarter` / `setActiveTabId` / `closeTab` | 源码审查 |
+| 右侧工具 Tab（多开/切换/关闭） | App.tsx `openRightTool` / `closeRightTool` | 源码审查 |
+| Gate 审批（approve/reject/changes） | ApprovalBar.tsx + App.tsx `decideApproval` | 源码审查 |
+| 新对话 / 会议室 / 新建任务 → 新 Tab | App.tsx `createGeneratedTab` | 源码审查 |
+| 构建 (`npm run build`) | tsc + vite → dist/ | ✅ 通过 |
+| 开发 (`npm run dev`) | Vite → 127.0.0.1:5173 | ✅ 通过 |
 
-# 浏览器开发（推荐 UI 开发用）
-npm run dev          # → http://localhost:5173
+---
 
-# Electron 桌面开发（需先 npm run dev，另开终端）
-npm run electron:dev  # 或 npm run dev 后 npm run electron:start
+## 5. 不做清单
 
-# 生产构建
-npm run build         # → dist/
-```
+| 约束 | 状态 |
+|------|:---:|
+| 不接真实 daedalusd 后端 | ✅ |
+| 不接真实 Electron IPC | ✅ |
+| 不重新设计 UI | ✅ |
+| 不引入 Redux / Zustand（只用 React state） | ✅ |
+| 不修改 Electron main process 业务逻辑 | ✅ |
+| 不修改 Rust/Python 后端 | ✅ |
+| 不删除 desktop-demo/ | ✅ |
+| 不删除会议模式 / Gate 审批条 | ✅ |
+| 不把右侧做成详情页再返回 | ✅ |
+| 不把中间顶部做成固定功能 Tab | ✅ |
+| 不新增 HTTP API 端点 | ✅ |
 
-## 5. 验证结果
+---
 
-```
-npm run build         ✅ tsc 编译通过 + vite build 成功
-                       43 modules, dist/ 产出正常
-npm run dev           ✅ Vite dev server 在 216ms 内启动
-                       http://localhost:5173 可访问
-```
+## 6. 后续真实 IPC 接入 TODO
 
-## 6. 交互确认（基于 skeleton 源码审查）
+| # | 事项 | 目标文件 | 依赖 |
+|:--|------|------|:---:|
+| 1 | `window.daedalusAPI.listSessions()` → 真实 `GET /api/tasks` | `electron/preload.js` | P4.2 已完成 |
+| 2 | `window.daedalusAPI.getHealth()` → 真实 `GET /api/health` | `electron/preload.js` | P4.1 已完成 |
+| 3 | `window.daedalusAPI.approveGate/rejectGate/requestChanges` → 真实 IPC permission response | `electron/preload.js` | daemon IPC 已有 |
+| 4 | `daedalusApi.ts` 从 mock 改为调用 `window.daedalusAPI` | `src/services/daedalusApi.ts` | 1-3 |
+| 5 | `App.tsx` 从 mock state 改为通过 `daedalusApi` 获取/更新数据 | `src/App.tsx` | 4 |
+| 6 | 实时事件流 `subscribeEvents` → daedalusd event stream | `electron/preload.js` + `daedalusApi.ts` | daemon IPC |
+| 7 | Electron 打包签名 / auto-update | `electron-builder.yml` | 1-6 稳定后 |
 
-| 功能 | 状态 | 实现位置 |
-|------|:---:|------|
-| 左侧展开/折叠 | ✅ | App.tsx `leftCollapsed` state + AppShell toggle |
-| 右侧显示/隐藏 | ✅ | App.tsx `rightCollapsed` state |
-| 中间工作 Tab（打开/切换/关闭） | ✅ | App.tsx `openStarter` / `setActiveTabId` / `closeTab` |
-| 右侧工具 Tab（多开/切换/关闭） | ✅ | App.tsx `openRightTool` / `closeRightTool` |
-| Gate 审批按钮 | ✅ | ApprovalBar.tsx + App.tsx `decideApproval`（approve/reject/changes） |
-| 新对话/会议室/新建任务生成新 Tab | ✅ | App.tsx `createGeneratedTab` |
-| 三种核心内容（对话/会议/任务） | ✅ | ChatView.tsx, EmptyView.tsx, ProjectView.tsx |
+---
 
-## 7. TODO（留给后续真实 IPC / 后端接入）
+## 7. 与后续 P4.4–P4.6 的关系
 
-| # | 事项 | 文件 |
-|:--|------|------|
-| 1 | `window.daedalusAPI` 改为真实 Electron IPC 调用 | `electron/preload.js` |
-| 2 | `listSessions()` 接 daedalusd `GET /api/tasks` | `src/services/daedalusApi.ts` |
-| 3 | `approveGate/rejectGate/requestChanges` 接 daedalusd permission response | `src/services/daedalusApi.ts` |
-| 4 | `getHealth()` 接 daedalusd `GET /api/health` | `src/services/daedalusApi.ts` |
-| 5 | 实时事件流（subscribeEvents）接 daedalusd event stream | `electron/preload.js` |
-| 6 | App.tsx 中的 mock state 替换为 daedalusApi 调用 + React state | `src/App.tsx` |
-| 7 | Electron 打包签名 / auto-update | `electron-builder.yml` |
-
-## 8. 已知风险 / 待审查
-
-- **无** browser e2e 自动化测试（只验证了编译和构建）
-- Electron main process 使用 CommonJS（`require`），renderer 使用 ESM（`import`）——这是标准 Electron 双模块模式，无需特殊处理
-- `daedalusApi.ts` 当前只有类型定义和 mock 实现，未在 App.tsx 中实际调用（App 使用自己的 `useState` mock state）——这是设计意图：先骨架稳定，后接 IPC
+| 后续任务 | 影响 daedalus-desktop？ |
+|------|:---:|
+| P4.4 配置诊断 + 模型摘要 API | 否（纯后端） |
+| P4.5 模型连通性探测 API | 否（纯后端） |
+| P4.6 Phase 4 验收收口 | 是（需确认 Electron app 可加载 + daedalusd HTTP API 可用） |

@@ -1559,9 +1559,10 @@ P3.1b AgentHistoryProvider [DONE] (2826c02)
 ```
 P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
   │
-  └─→ P4.2  Task 可观测性 API（只读）
+  └─→ P4.2  Task 可观测性 API [DONE] (36f688b, fixup 60703ce)
         │
-        └─→ P4.3  cc-haha 本地只读仪表盘 ★ UI 介入点
+        └─→ P4.3  daedalus-desktop Electron React UI Skeleton 收口 [DONE] ★ UI 介入点
+              │     (6dc9cd4, 75d7df6, a21b0df)
               │
               └─→ P4.4  配置诊断 + 模型摘要 API
                     │
@@ -1615,3 +1616,33 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 - registry.rs 注释明确 limit 安全上限，校验职责在 handler
 
 **不实现**：任务取消/重试、分页、WebSocket、统计聚合、outbox_json 返回
+
+## P4.3 daedalus-desktop Electron React UI Skeleton 收口 [DONE]
+
+> commits: 6dc9cd4, 75d7df6, a21b0df
+
+**修订原因**：
+- 原计划：daedalusd serving 单 HTML 仪表盘（`http/dashboard.rs` + `assets/dashboard.html`）
+- UI Skeleton 合并后，前端形态升级为 Electron + React + TypeScript 桌面项目
+- 修订后：`daedalus-desktop/` 成为 Phase 4+ 前端唯一载体，不再单独实现 cc-haha 单 HTML 仪表盘
+
+**核心交付**：
+- `daedalus-desktop/` 独立 Electron + Vite + React 19 + TypeScript 项目（31 个文件）
+- 左中右三栏布局：左侧展开/折叠、中间工作 Tab、右侧工具 Tab
+- 三种核心视图：对话 / 多 Agent 会议 / 任务执行 + Gate 审批
+- `electron/main.js` 最小 Electron 主进程壳
+- `electron/preload.js` contextBridge → `window.daedalusAPI`（mock 实现）
+- `src/services/daedalusApi.ts` 预留 IPC 接入层（后续真实 IPC 只从这里改）
+
+**验证**：
+- `cd daedalus-desktop && npm run build` ✅ tsc + vite（43 modules, ~660ms）
+- `npm run dev` ✅ Vite → 127.0.0.1:5173
+- mock UI，不接真实 daedalusd
+
+**不做清单**：
+- 不接真实 IPC / 后端
+- 不引入 Redux / Zustand（只用 React state）
+- 不重新设计 UI
+- 不改 Rust/Python 后端
+- 不删除 desktop-demo/
+- 不删除会议模式 / Gate 审批条
