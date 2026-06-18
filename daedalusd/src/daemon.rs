@@ -12,7 +12,7 @@ use crate::agent::permission::{IpcPermissionBroker, PermissionBroker};
 use crate::agent::r#loop::{AgentLoop, LifecycleContext};
 use crate::config::DaedalusConfig;
 use crate::db::{pool, registry};
-use crate::error::{DaedalusError, ErrorKind};
+use crate::error::DaedalusError;
 use crate::ipc::protocol;
 use crate::ipc::session::SessionState;
 use crate::tools::registry::ToolRegistry;
@@ -201,7 +201,8 @@ impl DaemonContext {
                     let _ = writer_tx2.send(msg).await;
                 }
                 Err(agent_error) => {
-                    let taxonomy = error_kind_to_str(&agent_error.reason);
+                    let taxonomy =
+                        crate::error::ErrorCode::from_error_kind(&agent_error.reason).as_str();
                     let msg = Message::TaskError(TaskError {
                         ts: protocol::now_utc(),
                         event_id,
@@ -220,13 +221,4 @@ impl DaemonContext {
     }
 }
 
-fn error_kind_to_str(kind: &ErrorKind) -> &'static str {
-    match kind {
-        ErrorKind::Cancelled => "cancelled",
-        ErrorKind::TaskTimeout => "task_timeout",
-        ErrorKind::ToolFailure => "tool_failure",
-        ErrorKind::MaxIterations => "max_iterations",
-        ErrorKind::ProviderExhausted => "provider_exhausted",
-        ErrorKind::ProviderFatal => "provider_fatal",
-    }
-}
+// error_kind_to_str removed — use ErrorCode::from_error_kind().as_str() instead.

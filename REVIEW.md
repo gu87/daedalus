@@ -1,41 +1,100 @@
-# P3.1b 返修完成报告：AgentHistoryProvider + agent_runs 历史注入
+# P3.2 实现完成报告：ErrorCode 枚举 + 统一错误分类
 
-> 基于 P3.1a（commit `703f8d4`），含 Codex 审查返修。
-
----
-
-## 1. 返修项
-
-| # | 问题 | 修复 |
-|:--|------|------|
-| 1 | 新增测试未落地 | db_registry +8 个 list_recent_runs 测试，prompt +6 个 AgentHistoryProvider 测试 |
-| 2 | REVIEW.md 文件清单不准确 | 修正为实际修改文件数 + 精确测试数 |
+> 基于 P3.1b（commit `2826c02`），对齐蓝图 §13.4。
 
 ---
 
-## 2. 修改文件清单
+## 1. 修改文件清单（4 个）
 
 | 文件 | 操作 | 变更摘要 |
 |------|:---:|------|
-| `daedalusd/src/config.rs` | 修改 | `DaedalusConfig` + `db_path: Option<PathBuf>`；`load()` 内部 `db_path: None` |
-| `daedalusd/src/error.rs` | 修改 | + `Database(String)` variant |
-| `daedalusd/src/db/registry.rs` | 修改 | + `AgentRunSummary` + `list_recent_runs()` |
-| `daedalusd/src/agent/prompt_sources.rs` | 修改 | + `AgentHistoryProvider` |
-| `daedalusd/src/agent/prompt.rs` | 修改 | `new()` 在 SkillsProvider 前插入 AgentHistoryProvider |
-| `daedalusd/src/main.rs` | 修改 | `config.db_path = Some(...)` |
-| `daedalusd/src/ipc/control.rs` | 修改 | 2 处 struct literal + `db_path: None` |
-| `daedalusd/tests/agent_loop.rs` | 修改 | + `db_path: None` |
-| `daedalusd/tests/full_dispatch.rs` | 修改 | + `db_path: None` |
-| `daedalusd/tests/prompt.rs` | 修改 | + `db_path: None` + 6 个 history 测试 |
-| `daedalusd/tests/db_registry.rs` | 修改 | + 8 个 list_recent_runs 测试 |
+| `daedalusd/src/error.rs` | 修改 | + `ErrorCode` enum（10 变体）+ `as_str()` + `from_error_kind()` + `from_provider_error()` |
+| `daedalusd/src/agent/loop.rs` | 修改 | 删除 `error_kind_to_taxonomy`；`Failed` arm 改用 `ErrorCode::from_error_kind().as_str()` |
+| `daedalusd/src/daemon.rs` | 修改 | 删除 `error_kind_to_str`；改用 `ErrorCode::from_error_kind().as_str()` |
+| `daedalusd/tests/error_code.rs` | **新增** | 10 个映射 + 序列化 + 兼容性测试 |
 
 ---
 
-## 3. 验证结果
+## 2. ErrorCode 定义
+
+### 2.1 10 个变体 + as_str 字符串
+
+| # | 变体 | `as_str()` | 来源 |
+|:--|------|------|------|
+| 1 | `Cancelled` | `"cancelled"` | ErrorKind::Cancelled |
+| 2 | `TaskTimeout` | `"task_timeout"` | ErrorKind::TaskTimeout |
+| 3 | `ToolFailure` | `"tool_failure"` | ErrorKind::ToolFailure |
+| 4 | `MaxIterations` | `"max_iterations"` | ErrorKind::MaxIterations |
+| 5 | `ProviderExhausted` | `"provider_exhausted"` | ErrorKind::ProviderExhausted |
+| 6 | `ProviderFatal` | `"provider_fatal"` | ErrorKind::ProviderFatal |
+| 7 | `ModelNotFound` | `"model_not_found"` | ProviderError::ModelNotFound |
+| 8 | `AuthFailure` | `"auth_failure"` | ProviderError::Auth |
+| 9 | `RateLimited` | `"rate_limited"` | ProviderError::RateLimited |
+| 10 | `Unknown` | `"unknown"` | ProviderError::Parse / future catch-all |
+
+序列化：`#[serde(rename_all = "snake_case")]`，`serde_json::to_string(&ErrorCode::TaskTimeout)` → `"\"task_timeout\""`。
+
+### 2.2 from_error_kind 映射（6 种，穷尽 match）
+
+| ErrorKind | ErrorCode |
+|------|------|
+| `Cancelled` | `Cancelled` |
+| `TaskTimeout` | `TaskTimeout` |
+| `ToolFailure` | `ToolFailure` |
+| `MaxIterations` | `MaxIterations` |
+| `ProviderExhausted` | `ProviderExhausted` |
+| `ProviderFatal` | `ProviderFatal` |
+
+**不映射到 Unknown**。`from_error_kind` 是穷尽 match，6 个变体显式覆盖。
+
+### 2.3 from_provider_error 映射（7 种）
+
+| ProviderError | ErrorCode |
+|------|------|
+| `Auth { .. }` | `AuthFailure` |
+| `RateLimited { .. }` | `RateLimited` |
+| `ModelNotFound(_)` | `ModelNotFound` |
+| `Network(_)` | `ProviderExhausted` |
+| `Timeout` | `ProviderExhausted` |
+| `Http { status >= 500, .. }` | `ProviderExhausted` |
+| `Http { status < 500, .. }` | `ProviderFatal` |
+| `Parse(_)` | `Unknown` |
+
+**定义 + 测试覆盖，P3.3 Gate 首次调用**。当前 Provider 错误路径仍通过 `is_fallbackable()` → `ErrorKind::ProviderExhausted/ProviderFatal` → `ErrorCode::from_error_kind()`。
+
+---
+
+## 3. 向后兼容
+
+### 3.1 task.error.error_taxonomy
+
+| 写入位置 | 旧实现 | 新实现 | 输出变化 |
+|------|------|------|:---:|
+| `daemon.rs` — `spawn_task` 发送 `TaskError` | `error_kind_to_str(&agent_error.reason)` | `ErrorCode::from_error_kind(&agent_error.reason).as_str()` | **无变化** |
+| `agent/loop.rs` — `Failed` arm 写 DB | `error_kind_to_taxonomy(&reason).to_string()` | `ErrorCode::from_error_kind(&reason).as_str().to_string()` | **无变化** |
+
+### 3.2 agent_runs.error_taxonomy
+
+旧 6 个字符串与 `ErrorCode::as_str()` 逐一对应，完全一致：
+
+```
+"cancelled"           = ErrorCode::Cancelled.as_str()
+"task_timeout"        = ErrorCode::TaskTimeout.as_str()
+"tool_failure"        = ErrorCode::ToolFailure.as_str()
+"max_iterations"      = ErrorCode::MaxIterations.as_str()
+"provider_exhausted"  = ErrorCode::ProviderExhausted.as_str()
+"provider_fatal"      = ErrorCode::ProviderFatal.as_str()
+```
+
+测试 `legacy_strings_unchanged` 逐一验证。
+
+---
+
+## 4. 验证结果
 
 ```
 cargo fmt --all -- --check               ✅ 通过
-cargo test --workspace                   ✅ 304 passed, 0 failed
+cargo test --workspace                   ✅ 314 passed, 0 failed
   -- --skip long_line_returns_error_and_closes
 cargo clippy --workspace -- -D warnings  ✅ 通过
 ```
@@ -45,51 +104,42 @@ cargo clippy --workspace -- -D warnings  ✅ 通过
 | 测试套 | passed | 变化 |
 |--------|-------:|:---:|
 | lib unit | 171 | — |
-| agent_loop integration | 20 | — |
-| db_registry integration | **23** | **+8** |
-| full_dispatch integration | 5 | — |
-| permission integration | 13 | — |
-| prompt integration | **35** | **+6**（含 2 个 PromptBuilder::new(cfg) 生产路径测试） |
-| protocol integration | 6 | — |
-| provider integration | 26 | — |
-| tool_registry integration | 5 | — |
-| **合计** | **304** | **+14** |
+| agent_loop | 20 | — |
+| db_registry | 23 | — |
+| error_code | **10** | **新增** |
+| full_dispatch | 5 | — |
+| permission | 13 | — |
+| prompt | 35 | — |
+| protocol | 6 | — |
+| provider | 26 | — |
+| tool_registry | 5 | — |
+| **合计** | **314** | **+10** |
 
-### 新增测试明细
+### 新增 error_code 测试
 
-**db_registry (+8):**
-
-| # | 测试 | 断言 |
+| # | 测试 | 覆盖 |
 |:--|------|------|
-| 1 | `list_recent_runs_only_terminal_statuses` | done/error/cancelled 选中，queued/running/orphaned 过滤 |
-| 2 | `list_recent_runs_limit` | limit=2 返回 2，limit=0 返回空 |
-| 3 | `list_recent_runs_sort_order` | completed_at DESC, spawned_at DESC, task_id ASC |
-| 4 | `list_recent_runs_empty` | 无历史 → 空 Vec |
-| 5 | `list_recent_runs_summary_extraction` | outbox_json.summary 提取正确 |
-| 6 | `list_recent_runs_bad_outbox_json_is_none` | 非法 JSON → outbox_summary=None |
-| 7 | `list_recent_runs_summary_truncated_unicode` | 中文 130 chars → 截断到 120 chars |
-| 8 | `list_recent_runs_missing_summary_field_is_none` | 缺 summary 字段 → None |
-
-**prompt (+6):**
-
-| # | 测试 | 断言 |
-|:--|------|------|
-| 1 | `history_provider_with_data` | 包含 task_id + status(done/error) + summary |
-| 2 | `history_provider_no_data_is_none` | 无历史 → Ok(None) |
-| 3 | `history_provider_none_summary_shows_dash` | outbox_summary=None → 显示 "—" |
-| 4 | `full_chain_db_path_none_no_history` | db_path=None → 不含 [history] |
-| 5 | `prompt_builder_new_db_path_some_injects_history` | **生产路径**：PromptBuilder::new(cfg) + db_path=Some → 自动注入 history |
-| 6 | `prompt_builder_new_history_between_agent_and_skills` | **生产路径**：PromptBuilder::new(cfg) → [agent] < [history] < [skills] |
+| 1 | `from_error_kind_cancelled` | ErrorKind::Cancelled → Cancelled |
+| 2 | `from_error_kind_task_timeout` | ErrorKind::TaskTimeout → TaskTimeout |
+| 3 | `from_error_kind_all_six` | 6 种 ErrorKind 穷尽 |
+| 4 | `from_provider_error_auth` | ProviderError::Auth → AuthFailure |
+| 5 | `from_provider_error_rate_limited` | ProviderError::RateLimited → RateLimited |
+| 6 | `from_provider_error_all_seven` | 7 种 ProviderError 全部 |
+| 7 | `as_str_all_ten` | 10 个 ErrorCode 字符串 |
+| 8 | `legacy_strings_unchanged` | 6 个旧字符串 = ErrorCode::as_str() |
+| 9 | `serde_roundtrip` | serde 序列化往返 |
+| 10 | `serde_all_ten_roundtrip` | 10 个变体全部往返 |
 
 ---
 
-## 4. 范围红线
+## 5. 不做清单
 
 | 约束 | 状态 |
 |------|:---:|
-| 不改 SQLite schema | ✅ |
-| 不改 IPC 协议 | ✅ |
+| 不改 SQLite schema（error_taxonomy 仍是 TEXT） | ✅ |
+| 不改 IPC 协议（TaskError.error_taxonomy 仍是 String） | ✅ |
 | 不改 AgentLoop 状态机 | ✅ |
-| 不做 Gate / ErrorCode / Monitor / FeedbackIngestor | ✅ |
-| 不做 system.ack / event replay / disk queue | ✅ |
-| 不做 HTTP API / UI | ✅ |
+| 不改变 task.error / error_taxonomy 旧输出 | ✅ |
+| `from_provider_error` 只定义不接入 | ✅ — P3.3 Gate 启用 |
+| GateRouter / CriteriaRegistry / SemanticCheck | ✅ 不做 |
+| system.ack / event replay / TaskStatus / pipeline.sqlite | ✅ 不做 |

@@ -614,7 +614,9 @@ impl AgentLoop {
                         hb.abort();
                         let db_path = lc.db_path.clone();
                         let run_id = lc.run_id.clone();
-                        let taxonomy = error_kind_to_taxonomy(&reason).to_string();
+                        let taxonomy = crate::error::ErrorCode::from_error_kind(&reason)
+                            .as_str()
+                            .to_string();
                         let is_cancelled = reason == ErrorKind::Cancelled;
                         let now = now_secs();
                         let rid = run_id.clone();
@@ -787,19 +789,6 @@ impl AgentLoop {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
-
-/// Map an [`ErrorKind`] to a stable taxonomy string for the
-/// `agent_runs.error_taxonomy` column.
-fn error_kind_to_taxonomy(kind: &ErrorKind) -> &'static str {
-    match kind {
-        ErrorKind::Cancelled => "cancelled",
-        ErrorKind::TaskTimeout => "task_timeout",
-        ErrorKind::ToolFailure => "tool_failure",
-        ErrorKind::MaxIterations => "max_iterations",
-        ErrorKind::ProviderExhausted => "provider_exhausted",
-        ErrorKind::ProviderFatal => "provider_fatal",
-    }
-}
 
 /// Current Unix timestamp in seconds.
 fn now_secs() -> i64 {

@@ -131,3 +131,82 @@ impl fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
+
+// ── ErrorCode (P3.2) ─────────────────────────────────────────────────
+
+/// Stable error taxonomy for agent_runs.error_taxonomy and TaskError.
+///
+/// Serialized as snake_case.  Every [`ErrorKind`] maps to exactly one
+/// variant.  Gate routing (P3.3) will branch on this.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// Task cancelled by user or external signal.
+    Cancelled,
+    /// Agent-level deadline expired.
+    TaskTimeout,
+    /// A tool returned an error or was misconfigured.
+    ToolFailure,
+    /// Agent exceeded the maximum LLM round-trip count.
+    MaxIterations,
+    /// All providers in the chain returned fallbackable errors.
+    ProviderExhausted,
+    /// A provider returned a non-fallbackable error (auth, bad request).
+    ProviderFatal,
+    /// Model not found in any provider configuration.
+    ModelNotFound,
+    /// API authentication failure (401/403).
+    AuthFailure,
+    /// Provider rate-limited (429).
+    RateLimited,
+    /// Unknown / unclassified error — catch-all.
+    Unknown,
+}
+
+impl ErrorCode {
+    /// Return the stable snake_case string for this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorCode::Cancelled => "cancelled",
+            ErrorCode::TaskTimeout => "task_timeout",
+            ErrorCode::ToolFailure => "tool_failure",
+            ErrorCode::MaxIterations => "max_iterations",
+            ErrorCode::ProviderExhausted => "provider_exhausted",
+            ErrorCode::ProviderFatal => "provider_fatal",
+            ErrorCode::ModelNotFound => "model_not_found",
+            ErrorCode::AuthFailure => "auth_failure",
+            ErrorCode::RateLimited => "rate_limited",
+            ErrorCode::Unknown => "unknown",
+        }
+    }
+
+    /// Map an [`ErrorKind`] to an ErrorCode.
+    ///
+    /// All six current ErrorKind variants are explicitly matched.  No
+    /// ErrorKind maps to Unknown.
+    pub fn from_error_kind(kind: &ErrorKind) -> Self {
+        match kind {
+            ErrorKind::Cancelled => ErrorCode::Cancelled,
+            ErrorKind::TaskTimeout => ErrorCode::TaskTimeout,
+            ErrorKind::ToolFailure => ErrorCode::ToolFailure,
+            ErrorKind::MaxIterations => ErrorCode::MaxIterations,
+            ErrorKind::ProviderExhausted => ErrorCode::ProviderExhausted,
+            ErrorKind::ProviderFatal => ErrorCode::ProviderFatal,
+        }
+    }
+
+    /// Map a [`ProviderError`] to an ErrorCode.
+    ///
+    /// Defined for P3.3 Gate use.  Not currently wired into AgentLoop.
+    pub fn from_provider_error(e: &ProviderError) -> Self {
+        match e {
+            ProviderError::Auth { .. } => ErrorCode::AuthFailure,
+            ProviderError::RateLimited { .. } => ErrorCode::RateLimited,
+            ProviderError::ModelNotFound(_) => ErrorCode::ModelNotFound,
+            ProviderError::Network(_) | ProviderError::Timeout => ErrorCode::ProviderExhausted,
+            ProviderError::Http { status, .. } if *status >= 500 => ErrorCode::ProviderExhausted,
+            ProviderError::Http { .. } => ErrorCode::ProviderFatal,
+            ProviderError::Parse(_) => ErrorCode::Unknown,
+        }
+    }
+}
