@@ -1,95 +1,105 @@
-# P4.3 实现方案：cc-haha 本地只读仪表盘
+# UI Skeleton 合并完成报告：daedalus-desktop
 
-> 基于 P4.2（commit `60703ce`），实现单 HTML 管理仪表盘。
-> **只读展示，零操作按钮，零外部依赖。**
-
----
-
-## 1. 目标
-
-daedalusd HTTP server 直接 serving 一个单 HTML 管理仪表盘，展示：
-- 健康状态（daemon uptime、socket 状态、DB 连通性）
-- 任务数量快照（running / done / error 计数）
-- 最近 20 条任务列表
-
-数据来源：JS 通过 `fetch('/api/health')` + `fetch('/api/tasks')` 获取，5s 轮询刷新。
+> 将 `daedalus_react_ui_skeleton.zip` 合并为 `daedalus-desktop/` Electron + React + TypeScript 桌面项目。
+> Commit: `6dc9cd4`
 
 ---
 
-## 2. 设计
+## 1. 目标达成
 
-### 2.1 布局
+- ✅ Skeleton UI 完整合并进 `daedalus-desktop/`
+- ✅ Electron 主进程 + preload 桥接层
+- ✅ Vite + React 19 + TypeScript 构建链路
+- ✅ 零真实后端接入（纯 mock data）
+- ✅ 不改 daedalusd 后端、不改 desktop-demo/
+
+---
+
+## 2. 项目结构
 
 ```
-┌──────────────────────────────────────────────┐
-│  daedalusd cc-haha                           │
-│  ────────────────────────────────────────────│
-│  Daemon: up 2h34m  socket ✅  db ✅          │
-│                                              │
-│  [Running: 3]  [Done: 127]  [Error: 12]       │
-│                                              │
-│  Recent Tasks                                │
-│  run-abc123  test-agent  error  tool_failure │
-│  run-def456  designer   done   —             │
-│  ...                                         │
-└──────────────────────────────────────────────┘
+daedalus-desktop/
+├── electron/
+│   ├── main.js          # Electron 主进程（最小壳）
+│   └── preload.js       # contextBridge → window.daedalusAPI（mock）
+├── src/
+│   ├── main.tsx         # React 入口
+│   ├── App.tsx          # 根组件（全部 UI 状态管理）
+│   ├── styles.css       # 全局样式
+│   ├── components/      # AppShell, LeftSidebar, CenterTabs, Composer,
+│   │                      ApprovalBar, RightToolDrawer, MainContent,
+│   │                      LeftRail
+│   ├── views/           # ChatView, ProjectView, EmptyView
+│   ├── data/mockData.ts # Mock 工作区 + 标签数据
+│   ├── types/index.ts   # TypeScript 类型定义
+│   ├── utils/           # time.ts, view.ts
+│   └── services/
+│       └── daedalusApi.ts # ★ 预留 IPC 接入层（后续只从这里接真实后端）
+├── package.json         # Electron + Vite + React 依赖
+├── vite.config.ts       # base: "./" 兼容 Electron file://
+├── tsconfig.json
+├── electron-builder.yml # 打包配置
+└── .gitignore
 ```
 
-### 2.2 技术约束
+## 3. 修改的文件
 
-- **单文件**：一个 `dashboard.html`，内联 CSS + JS
-- **零外部依赖**：无 npm/webpack/React/CDN/外部字体
-- **编译时嵌入**：`include_str!("assets/dashboard.html")` 编译进二进制
-- **数据获取**：`fetch('/api/health')` + `fetch('/api/tasks?limit=20')`
-- **刷新**：`setInterval(fetchData, 5000)`
-- **不实现**：WebSocket、SSE、任务操作按钮、登录、暗色模式
+| 类型 | 文件 | 说明 |
+|------|------|------|
+| 新增 | `daedalus-desktop/` (31 文件) | 完整桌面项目 |
+| 修改 | `.gitignore` | + node_modules/ dist/ release/ |
+| 未改 | `daedalusd/` `daedalus-orch/` `desktop-demo/` | 后端和旧 demo 完全不动 |
 
----
+## 4. 如何启动
 
-## 3. 文件边界
+```bash
+cd daedalus-desktop/
 
-| 文件 | 操作 | 变更摘要 |
+# 浏览器开发（推荐 UI 开发用）
+npm run dev          # → http://localhost:5173
+
+# Electron 桌面开发（需先 npm run dev，另开终端）
+npm run electron:dev  # 或 npm run dev 后 npm run electron:start
+
+# 生产构建
+npm run build         # → dist/
+```
+
+## 5. 验证结果
+
+```
+npm run build         ✅ tsc 编译通过 + vite build 成功
+                       43 modules, dist/ 产出正常
+npm run dev           ✅ Vite dev server 在 216ms 内启动
+                       http://localhost:5173 可访问
+```
+
+## 6. 交互确认（基于 skeleton 源码审查）
+
+| 功能 | 状态 | 实现位置 |
 |------|:---:|------|
-| `daedalusd/src/http/assets/dashboard.html` | **新增** | 单 HTML 仪表盘（~150 行，内联 CSS + JS） |
-| `daedalusd/src/http/dashboard.rs` | **新增** | `GET /` handler — 返回内嵌 HTML |
-| `daedalusd/src/http/server.rs` | 修改 | 注册 `GET /` 路由 |
-| `daedalusd/tests/http_dashboard.rs` | **新增** | 集成测试（GET / → 200 + HTML 包含关键标签） |
+| 左侧展开/折叠 | ✅ | App.tsx `leftCollapsed` state + AppShell toggle |
+| 右侧显示/隐藏 | ✅ | App.tsx `rightCollapsed` state |
+| 中间工作 Tab（打开/切换/关闭） | ✅ | App.tsx `openStarter` / `setActiveTabId` / `closeTab` |
+| 右侧工具 Tab（多开/切换/关闭） | ✅ | App.tsx `openRightTool` / `closeRightTool` |
+| Gate 审批按钮 | ✅ | ApprovalBar.tsx + App.tsx `decideApproval`（approve/reject/changes） |
+| 新对话/会议室/新建任务生成新 Tab | ✅ | App.tsx `createGeneratedTab` |
+| 三种核心内容（对话/会议/任务） | ✅ | ChatView.tsx, EmptyView.tsx, ProjectView.tsx |
 
-**不改**：health.rs、tasks.rs、main.rs、daemon.rs、registry.rs、IPC、schema
+## 7. TODO（留给后续真实 IPC / 后端接入）
 
----
+| # | 事项 | 文件 |
+|:--|------|------|
+| 1 | `window.daedalusAPI` 改为真实 Electron IPC 调用 | `electron/preload.js` |
+| 2 | `listSessions()` 接 daedalusd `GET /api/tasks` | `src/services/daedalusApi.ts` |
+| 3 | `approveGate/rejectGate/requestChanges` 接 daedalusd permission response | `src/services/daedalusApi.ts` |
+| 4 | `getHealth()` 接 daedalusd `GET /api/health` | `src/services/daedalusApi.ts` |
+| 5 | 实时事件流（subscribeEvents）接 daedalusd event stream | `electron/preload.js` |
+| 6 | App.tsx 中的 mock state 替换为 daedalusApi 调用 + React state | `src/App.tsx` |
+| 7 | Electron 打包签名 / auto-update | `electron-builder.yml` |
 
-## 4. 数据流
+## 8. 已知风险 / 待审查
 
-```
-Browser GET /
-  → dashboard handler → include_str!("assets/dashboard.html") → HTML
-  → JS 加载后 setInterval:
-      fetch('/api/health') → 渲染健康状态
-      fetch('/api/tasks?limit=20') → 渲染任务列表 + 计数
-  → 5s 后重复
-```
-
----
-
-## 5. 测试计划
-
-| # | 测试 | 场景 | 断言 |
-|:--|------|------|------|
-| 1 | `dashboard_returns_html` | GET / | 200 + Content-Type: text/html + 包含 `daedalusd cc-haha` |
-| 2 | `dashboard_js_can_fetch_data` | 启动 daemon（有预写入任务）+ GET / + 解析 HTML | 确认页面包含可用 JS tag（`<script>`、`fetch(`） |
-| 3 | `dashboard_works_with_no_tasks` | 空 DB | GET / → 200，页面正常加载 |
-
----
-
-## 6. 不做清单
-
-| 约束 | 状态 |
-|------|:---:|
-| 多页面 / SPA 路由 | ✅ 不实现 |
-| WebSocket / SSE 实时推送 | ✅ 不实现 |
-| 任务操作按钮（取消/重试） | ✅ 不实现 |
-| 用户认证 / 角色权限 | ✅ 不实现 |
-| i18n / 暗色模式 / 移动端适配 | ✅ 不实现 |
-| 外部 CDN / npm / React / 构建工具 | ✅ 不实现 |
-| 修改任何后端 API | ✅ 只消费已有端点 |
+- **无** browser e2e 自动化测试（只验证了编译和构建）
+- Electron main process 使用 CommonJS（`require`），renderer 使用 ESM（`import`）——这是标准 Electron 双模块模式，无需特殊处理
+- `daedalusApi.ts` 当前只有类型定义和 mock 实现，未在 App.tsx 中实际调用（App 使用自己的 `useState` mock state）——这是设计意图：先骨架稳定，后接 IPC
