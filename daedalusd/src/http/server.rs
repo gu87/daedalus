@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use super::health::{self, HttpState};
+use super::tasks;
 
 /// Start the HTTP server on `listener`.
 ///
@@ -21,6 +22,8 @@ pub async fn run_http(listener: TcpListener, state: Arc<HttpState>, shutdown: Ca
     // Build the router.
     let app = Router::new()
         .route("/api/health", get(health::health))
+        .route("/api/tasks", get(tasks::list_tasks))
+        .route("/api/tasks/:run_id", get(tasks::get_task))
         .with_state(state);
 
     axum::serve(listener, app)

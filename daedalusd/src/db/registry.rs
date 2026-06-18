@@ -29,6 +29,19 @@ impl AgentRunStatus {
             AgentRunStatus::Orphaned => "orphaned",
         }
     }
+
+    /// P4.2: parse from the snake_case string used in the CHECK constraint.
+    pub fn parse_status(s: &str) -> Option<Self> {
+        match s {
+            "queued" => Some(AgentRunStatus::Queued),
+            "running" => Some(AgentRunStatus::Running),
+            "done" => Some(AgentRunStatus::Done),
+            "error" => Some(AgentRunStatus::Error),
+            "cancelled" => Some(AgentRunStatus::Cancelled),
+            "orphaned" => Some(AgentRunStatus::Orphaned),
+            _ => None,
+        }
+    }
 }
 
 // ── row types ────────────────────────────────────────────────────────
@@ -244,6 +257,74 @@ pub fn list_recent_runs(
             outbox_summary,
         })
     })?;
+    rows.collect()
+}
+
+// ── P4.2: list runs with filtering ───────────────────────────────────
+
+/// Filter options for [`list_runs`].
+#[derive(Debug, Clone)]
+pub struct ListRunsFilter {
+    /// If `Some`, only return runs with this status.
+    pub status: Option<AgentRunStatus>,
+    /// If `Some`, only return runs for this agent.
+    pub agent_id: Option<String>,
+    /// Maximum rows to return (1..=100).
+    pub limit: u32,
+}
+
+/// P4.2: lightweight summary for the task list API.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ListRunEntry {
+    pub run_id: String,
+    pub agent_id: String,
+    pub task_id: String,
+    pub status: String,
+    pub spawned_at: i64,
+    pub completed_at: Option<i64>,
+    pub error_taxonomy: Option<String>,
+}
+
+/// Return matching runs, newest first with stable tie-breaker.
+///
+/// Query is parameterised — no string interpolation.
+pub fn list_runs(conn: &Connection, filter: &ListRunsFilter) -> Result<Vec<ListRunEntry>> {
+    let limit = filter.limit.min(100) as i64;
+
+    let mut sql = String::from(
+        "SELECT run_id, agent_id, task_id, status, spawned_at, completed_at, error_taxonomy \
+         FROM agent_runs WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(ref s) = filter.status {
+        sql.push_str(" AND status = ?");
+        params.push(Box::new(s.as_str().to_string()));
+    }
+    if let Some(ref a) = filter.agent_id {
+        sql.push_str(" AND agent_id = ?");
+        params.push(Box::new(a.clone()));
+    }
+
+    sql.push_str(" ORDER BY spawned_at DESC, run_id ASC LIMIT ?");
+    params.push(Box::new(limit));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        let status_str: String = row.get(3)?;
+        Ok(ListRunEntry {
+            run_id: row.get(0)?,
+            agent_id: row.get(1)?,
+            task_id: row.get(2)?,
+            status: status_str,
+            spawned_at: row.get(4)?,
+            completed_at: row.get(5)?,
+            error_taxonomy: row.get(6)?,
+        })
+    })?;
+
     rows.collect()
 }
 
