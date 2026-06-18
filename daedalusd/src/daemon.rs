@@ -115,7 +115,7 @@ impl DaemonContext {
         let initial_agent_id = td.agent_id.clone();
         let task_id = td.task_id.clone();
         let req_id = td.req_id.clone();
-        let event_id = td.event_id.clone();
+        let _event_id = td.event_id.clone();
         let task_card = td.task_card.clone();
 
         // ── 1. Build IpcPermissionBroker ──
