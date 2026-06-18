@@ -1,35 +1,24 @@
 # Daedalus — Agent OS
 
-Phase 2 skeleton: Rust daemon (`daedalusd`) + Python CLI (`daedalus`),
-communicating via NDJSON over a Unix domain socket. Provider Layer,
-Tool-use Loop, Tool Registry, permission relay, heartbeat/orphan, and
-full `task.dispatch → task.done` lifecycle.
+Phase 4: Rust daemon (`daedalusd`) + Electron desktop (`daedalus-desktop`) + Python CLI (`daedalus`).
 
-## Phase 2 capabilities
+## Phase 3–4 capabilities
 
-- `daedalusd` — tokio UDS server, Agent Loop state machine, SQLite lifecycle
-- **Provider Layer** — `LLMProvider` trait, Anthropic + OpenAI Compat adapters,
-  SSE streaming, Router with fallback chain, `models.yaml` config
-- **Agent Loop** — 9-state `LoopState` machine (`BuildingPrompt` → `SendingToLLM`
-  → `ReceivingStream` → `ExecutingTool` → `AwaitingPermission` → `BuildingResponse`
-  → `Done`/`Failed`), `CancellationToken`-based timeout/cancel, 30-iteration cap
-- **Tool Registry** — `Tool` trait (`definition`, `risk_level`, `allowed_agents`,
-  `needs_permission`, `validate`, `execute`), four built-in tools (`file_read`,
-  `file_write`, `terminal`, `task_done`)
-- **Permission Broker** — `PermissionBroker` trait, `IpcPermissionBroker` with
-  `permission.request`/`permission.response` over UDS, session-scoped pending map,
-  default timeout → denied
-- **Bidirectional IPC Session** — bounded writer channel (cap 64), daemon-initiated
-  push for `permission.request`/`task.done`/`task.error`
-- **Heartbeat + Orphan** — `HeartbeatLoop` (30 s interval, `spawn_blocking` short
-  connections), `scan_orphans` (90 s cutoff, 60 s scan interval)
-- **DB Lifecycle** — `agent_runs`: `queued → running → done/error/cancelled/orphaned`,
-  all transitions with `WHERE status = <expected>` guards
-- **Full dispatch chain** — `task.dispatch → DaemonContext::spawn_task → AgentLoop::
-  run_with_lifecycle → task.done/task.error` over UDS
-- Python `dispatch()` reads `permission.request`/`task.stream`/`task.done`/`task.error`
-  in a loop, returns `{done, streams}`
-- Phase 1 protocol retained: `system.ping`/`system.pong`/`system.error`
+### Phase 3 — Gate & Quality System
+- **ErrorCode taxonomy** — 10 variants: Cancelled, TaskTimeout, ToolFailure, MaxIterations, ProviderExhausted, ProviderFatal, ModelNotFound, AuthFailure, RateLimited, Unknown
+- **Gate routing** — `CriteriaRegistry` + `GateRouter` with YAML override (`gate-criteria.yaml`)
+- **AutoRevision** — retry loop with build-before-insert, feedback injection, global retry cap
+- **ProviderError granularity** — `AgentError::error_code()` single source of truth, preserved through `LoopState::Failed`
+- **SemanticTag** — 6 tags (Permanent/Transient/NeedsHuman/PermissionDenied/ConfigurationError/ResourceExhausted), AND matching in Gate criteria
+- **SwitchAgent** — cross-agent dispatch sharing the same retry loop as AutoRevision
+
+### Phase 4 — HTTP API & Observability
+- **`GET /api/health`** — daemon status, uptime, DB connectivity
+- **`GET /api/tasks`** — task list with status/agent filtering, limit 1..=100
+- **`GET /api/tasks/:run_id`** — single task detail
+- **`GET /api/config/models`** — model summary (id/provider/type only, no secrets)
+- **`POST /api/models/validate`** — single-model connectivity probe (Router production path, 10s timeout)
+- **daedalus-desktop** — Electron + React + TypeScript UI skeleton (mock data, zero backend)
 
 ## Quick start
 
@@ -44,6 +33,9 @@ cargo build
 daedalus ping
 # → {"type":"system.pong","ts":"...","req_id":"..."}
 
+# HTTP API (daemon must be running)
+curl http://127.0.0.1:9800/api/health
+
 # Stop
 kill $(pgrep daedalusd)
 ```
@@ -53,6 +45,7 @@ Custom paths:
 ```bash
 DAEDALUSD_SOCK=/tmp/test.sock \
 DAEDALUSD_STATE_DIR=/tmp/test-state \
+DAEDALUSD_HTTP_ADDR=127.0.0.1:9800 \
   ./target/debug/daedalusd &
 
 daedalus ping --socket /tmp/test.sock
@@ -64,10 +57,12 @@ daedalus ping --socket /tmp/test.sock
 |----------|---------|---------|
 | `DAEDALUSD_SOCK` | `/tmp/daedalusd.sock` | Unix domain socket path |
 | `DAEDALUSD_STATE_DIR` | `~/.daedalus/state` | SQLite database directory |
+| `DAEDALUSD_HTTP_ADDR` | `127.0.0.1:9800` | HTTP management API listen address (loopback only) |
 | `DAEDALUS_SOUL_PATH` | `~/.daedalus/SOUL.md` | System identity prompt |
 | `DAEDALUS_MANAGED_AGENTS_PATH` | `~/.daedalus/config/managed-agents.yaml` | Agent definitions |
 | `DAEDALUS_SKILLS_DIR` | `~/.hermes/skills` | Skill markdown files |
 | `DAEDALUS_MODELS_YAML` | `~/.daedalus/models.yaml` | Model pool config |
+| `DAEDALUS_GATE_CRITERIA_PATH` | `~/.daedalus/config/gate-criteria.yaml` | Gate routing override |
 
 ## Development verification
 
@@ -83,15 +78,21 @@ PYTHONPATH=daedalus-orch pytest daedalus-orch/tests/test_client.py
 
 # Phase 2 end-to-end smoke
 scripts/smoke-phase2.sh
+
+# Phase 4 HTTP API smoke (requires Python 3)
+scripts/smoke-phase4.sh
+
+# daedalus-desktop
+cd daedalus-desktop && npm run build
 ```
 
 ## Architecture
 
 ```
- daedalusd (Rust)                           daedalus-orch (Python)
+ daedalusd (Rust)                           daedalus-desktop (Electron+React)
       │                                           │
-      │  NDJSON over UDS                          │
-      │  /tmp/daedalusd.sock                      │
+      │  NDJSON over UDS                HTTP API  │  (future IPC bridge)
+      │  /tmp/daedalusd.sock        127.0.0.1:9800│
       └───────────────────────────────────────────┘
 
  ┌────────────────── daedalusd ──────────────────┐
@@ -123,22 +124,27 @@ scripts/smoke-phase2.sh
  │  db/registry.rs    ── agent_runs CRUD           │
  │  db/orphan.rs      ── orphan scanner            │
  │                                                │
+ │  gate.rs           ── GateRouter, SemanticTags │
+ │  error.rs          ── DaedalusError, AgentError,│
+ │                       ErrorCode                │
+ │                                                │
+ │  http/             ── axum HTTP server          │
+ │  http/health.rs    ── GET /api/health           │
+ │  http/tasks.rs     ── GET /api/tasks            │
+ │  http/config.rs    ── GET /api/config/models    │
+ │  http/validate.rs  ── POST /api/models/validate │
+ │                                                │
  │  types.rs          ── Message enum, TaskCard,   │
  │                       Outbox, ToolDef, etc.     │
  │  config.rs         ── DaedalusConfig, models.yaml│
- │  error.rs          ── DaedalusError, AgentError │
  └────────────────────────────────────────────────┘
 ```
 
-## What Phase 2 does NOT include
+## What Phase 4 does NOT include
 
-- MEMORY.md / USER.md / feedback-memory / project-context injection → Phase 3
-- Gate / CriteriaRegistry / SemanticCheck / GateRouter → Phase 3
-- ErrorCode enum → Phase 3
-- TaskStatus (9 states) / pipeline.sqlite → Phase 3
-- `system.ack` / ledger / event replay / disk queue → Phase 3
-- `code_search` / `send_message` tools → Phase 3
-- models.yaml hot-reload / HTTP API / cc-haha dashboard → Phase 4
-- DAEDALUS.md / Omega / performance tuning → Phase 4+
-- External CLI Agent adapter → Phase 4
-- Transport abstraction (TCP, mTLS) → Phase 4+
+- Credential hot-reload / Gemini / Cohere providers → Phase 4+
+- gate-criteria.yaml hot-reload → Phase 4+
+- WebSocket / SSE real-time push
+- Task cancel / retry API
+- daedalus-desktop real IPC / backend integration
+- system.ack / event replay / pipeline / Omega → Phase 5
