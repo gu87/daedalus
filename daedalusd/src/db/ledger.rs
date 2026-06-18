@@ -5,13 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::error::DaedalusError;
 use crate::types::Message;
 
-// ── helpers ─────────────────────────────────────────────────────────
-
 fn map_db_err(e: rusqlite::Error) -> DaedalusError {
     DaedalusError::Database(format!("{e}"))
 }
-
-// ── StoredEvent ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct StoredEvent {
@@ -20,8 +16,6 @@ pub struct StoredEvent {
     pub payload_json: String,
     pub seq: u32,
 }
-
-// ── Ledger ─────────────────────────────────────────────────────────
 
 pub struct Ledger {
     db_path: PathBuf,
@@ -75,7 +69,6 @@ impl Ledger {
             .map_err(map_db_err)?;
 
             txn.commit().map_err(map_db_err)?;
-
             Ok::<_, DaedalusError>((event_id, msg))
         })
         .await
@@ -99,7 +92,7 @@ impl Ledger {
                     let mut stmt = conn
                         .prepare(
                             "SELECT event_id, message_type, payload_json, seq \
-                         FROM events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC",
+                             FROM events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC",
                         )
                         .map_err(map_db_err)?;
                     let rows = stmt
@@ -120,7 +113,7 @@ impl Ledger {
                     let mut stmt = conn
                         .prepare(
                             "SELECT event_id, message_type, payload_json, seq \
-                         FROM events WHERE task_id = ?1 ORDER BY seq ASC",
+                             FROM events WHERE task_id = ?1 ORDER BY seq ASC",
                         )
                         .map_err(map_db_err)?;
                     let rows = stmt
@@ -144,18 +137,24 @@ impl Ledger {
         .map_err(|_| DaedalusError::Protocol("spawn_blocking panic in query_events_since".into()))?
     }
 
-    pub async fn mark_acked(&self, event_id: &str, acked_at: i64) -> Result<(), DaedalusError> {
+    /// Mark an event as acknowledged.  Returns `true` if the event existed.
+    pub async fn mark_acked(
+        &self,
+        event_id: &str,
+        acked_at: i64,
+    ) -> Result<bool, DaedalusError> {
         let db_path = self.db_path.clone();
         let eid = event_id.to_string();
 
         tokio::task::spawn_blocking(move || {
             let conn = crate::db::pool::open(&db_path).map_err(map_db_err)?;
-            conn.execute(
-                "UPDATE events SET acked_at = ?1 WHERE event_id = ?2",
-                rusqlite::params![acked_at, eid],
-            )
-            .map_err(map_db_err)?;
-            Ok::<_, DaedalusError>(())
+            let rows = conn
+                .execute(
+                    "UPDATE events SET acked_at = ?1 WHERE event_id = ?2",
+                    rusqlite::params![acked_at, eid],
+                )
+                .map_err(map_db_err)?;
+            Ok::<_, DaedalusError>(rows > 0)
         })
         .await
         .map_err(|_| DaedalusError::Protocol("spawn_blocking panic in mark_acked".into()))?

@@ -122,6 +122,7 @@ impl DaemonContext {
         let perm_broker = Arc::new(IpcPermissionBroker::new(
             Arc::clone(&session_state),
             writer_tx.clone(),
+            Arc::clone(&self.ledger),
             PERMISSION_TIMEOUT,
         ));
 
@@ -279,6 +280,7 @@ impl DaemonContext {
                                 let broker = Arc::new(IpcPermissionBroker::new(
                                     Arc::clone(&session_state),
                                     writer_tx2.clone(),
+                                    Arc::clone(&ledger),
                                     PERMISSION_TIMEOUT,
                                 ));
 
@@ -395,6 +397,7 @@ impl DaemonContext {
                                 let broker = Arc::new(IpcPermissionBroker::new(
                                     Arc::clone(&session_state),
                                     writer_tx2.clone(),
+                                    Arc::clone(&ledger),
                                     PERMISSION_TIMEOUT,
                                 ));
 

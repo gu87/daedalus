@@ -55,11 +55,81 @@ pub async fn route(
                         }
                     }
                 }
-                Message::SessionRejoin(ref sr) => Some(protocol::make_error(
-                    SystemErrorCode::InvalidMessage,
-                    Some(sr.req_id.clone()),
-                    "session.rejoin replay not implemented in Phase 2".into(),
-                )),
+                Message::SessionRejoin(ref sr) => {
+                    // P5.2: query ledger and replay missed events.
+                    let after_seq: Option<u32> = sr.last_event_id.as_ref().and_then(|eid| {
+                        eid.rsplit(':').next().and_then(|s| s.parse::<u32>().ok())
+                    });
+
+                    // If last_event_id was provided but invalid, report error.
+                    if sr.last_event_id.is_some() && after_seq.is_none() {
+                        Some(protocol::make_error(
+                            SystemErrorCode::InvalidMessage,
+                            Some(sr.req_id.clone()),
+                            format!(
+                                "session.rejoin: invalid last_event_id '{}'",
+                                sr.last_event_id.as_deref().unwrap_or("")
+                            ),
+                        ))
+                    } else {
+                        // Replay in an inner async block for `?` ergonomics.
+                        let replay = async {
+                            let events = ctx
+                                .ledger
+                                .query_events_since(&sr.task_id, after_seq)
+                                .await
+                                .map_err(|e| {
+                                    protocol::make_error(
+                                        SystemErrorCode::InvalidMessage,
+                                        Some(sr.req_id.clone()),
+                                        format!("session.rejoin query failed: {e}"),
+                                    )
+                                })?;
+                            for stored in &events {
+                                let msg = protocol::parse_message(&stored.payload_json)
+                                    .map_err(|e| {
+                                        protocol::make_error(
+                                            SystemErrorCode::InvalidMessage,
+                                            Some(sr.req_id.clone()),
+                                            format!(
+                                                "failed to replay event {}: {e:?}",
+                                                stored.event_id
+                                            ),
+                                        )
+                                    })?;
+                                let _ = writer_tx.send(msg).await;
+                            }
+                            Ok(())
+                        };
+                        match replay.await {
+                            Ok(()) => None,
+                            Err(err) => {
+                                let _ = writer_tx.send(err).await;
+                                None
+                            }
+                        }
+                    }
+                }
+                Message::SystemAck(ref sa) => {
+                    // P5.2: mark event as acknowledged.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    match ctx.ledger.mark_acked(&sa.event_id, now).await {
+                        Ok(true) => None, // silent success
+                        Ok(false) => Some(protocol::make_error(
+                            SystemErrorCode::InvalidMessage,
+                            Some(sa.req_id.clone()),
+                            format!("unknown event_id: {}", sa.event_id),
+                        )),
+                        Err(e) => Some(protocol::make_error(
+                            SystemErrorCode::InvalidMessage,
+                            Some(sa.req_id.clone()),
+                            format!("system.ack failed: {e}"),
+                        )),
+                    }
+                }
                 Message::TaskDispatch(ref td) => {
                     // P2.7: delegate to DaemonContext.
                     let writer_tx = writer_tx.clone();
@@ -69,8 +139,7 @@ pub async fn route(
                 Message::TaskStream(_)
                 | Message::TaskDone(_)
                 | Message::TaskError(_)
-                | Message::PermissionRequest(_)
-                | Message::SystemAck(_) => None,
+                | Message::PermissionRequest(_) => None,
             }
         }
         Err(pe) => Some(pe.into_message()),

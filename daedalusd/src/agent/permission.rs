@@ -12,6 +12,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 
 use crate::error::AgentError;
+use crate::db::ledger::Ledger;
 use crate::error::ErrorKind;
 use crate::ipc::session::SessionState;
 use crate::types::{Message, PermissionDecision, PermissionRequest, ToolCall};
@@ -55,7 +56,7 @@ impl PermissionBroker for FakePermissionBroker {
         _agent_id: &str,
         _req_id: &str,
         _tool_call: &ToolCall,
-        _task_id: &str,
+        task_id: &str,
     ) -> Result<PermissionDecision, AgentError> {
         if let Some(d) = self.delay {
             tokio::time::sleep(d).await;
@@ -71,6 +72,7 @@ impl PermissionBroker for FakePermissionBroker {
 pub struct IpcPermissionBroker {
     state: Arc<SessionState>,
     writer_tx: mpsc::Sender<Message>,
+    ledger: Arc<Ledger>,
     /// How long to wait before defaulting to Denied.
     default_timeout: Duration,
 }
@@ -79,11 +81,13 @@ impl IpcPermissionBroker {
     pub fn new(
         state: Arc<SessionState>,
         writer_tx: mpsc::Sender<Message>,
+        ledger: Arc<Ledger>,
         default_timeout: Duration,
     ) -> Self {
         Self {
             state,
             writer_tx,
+            ledger,
             default_timeout,
         }
     }
@@ -96,7 +100,7 @@ impl PermissionBroker for IpcPermissionBroker {
         agent_id: &str,
         req_id: &str,
         tool_call: &ToolCall,
-        _task_id: &str,
+        task_id: &str,
     ) -> Result<PermissionDecision, AgentError> {
         // Guard: req_id must not be empty.
         if req_id.is_empty() {
@@ -123,18 +127,35 @@ impl PermissionBroker for IpcPermissionBroker {
             );
         }
 
-        // 3. Send permission.request.
-        let pr = Message::PermissionRequest(PermissionRequest {
-            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            event_id: None,
-            permission_id: perm_id.clone(),
-            req_id: req_id.to_string(),
-            agent_id: agent_id.to_string(),
-            tool: tool_call.name.clone(),
-            args: tool_call.input.clone(),
-        });
+        // 3. Send permission.request via reliable path (P5.2).
+        let ledger = Arc::clone(&self.ledger);
+        let writer = self.writer_tx.clone();
+        let tid = task_id.to_string();
+        let pid = perm_id.clone();
+        let rid = req_id.to_string();
+        let aid = agent_id.to_string();
+        let tname = tool_call.name.clone();
+        let targs = tool_call.input.clone();
+        let send_result = crate::ipc::reliable::send_reliable_event(
+            &writer,
+            &ledger,
+            &tid,
+            "permission.request",
+            move |event_id| {
+                Message::PermissionRequest(PermissionRequest {
+                    ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    event_id: Some(event_id),
+                    permission_id: pid,
+                    req_id: rid,
+                    agent_id: aid,
+                    tool: tname,
+                    args: targs,
+                })
+            },
+        )
+        .await;
 
-        if self.writer_tx.send(pr).await.is_err() {
+        if send_result.is_err() {
             // Send failed — clean up pending and return error.
             let mut map = self.state.pending_permissions.lock().unwrap();
             map.remove(&perm_id);
