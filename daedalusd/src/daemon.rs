@@ -449,6 +449,7 @@ impl DaemonContext {
                                             },
                                         )
                                         .await;
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                         break;
                                     }
                                     Err(_) => {
@@ -470,6 +471,7 @@ impl DaemonContext {
                                                 })
                                             },
                                         ).await;
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                         break;
                                     }
                                 }
@@ -582,7 +584,6 @@ impl DaemonContext {
                                         let rid = req_id.clone();
                                         let detail =
                                             format!("failed to insert retry agent_runs row: {e}");
-                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                         let _ = crate::ipc::reliable::send_reliable_event(
                                             &writer_tx2,
                                             &ledger,
@@ -603,6 +604,7 @@ impl DaemonContext {
                                             },
                                         )
                                         .await;
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                         break;
                                     }
                                     Err(_) => {
@@ -624,6 +626,7 @@ impl DaemonContext {
                                                 })
                                             },
                                         ).await;
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                         break;
                                     }
                                 }
