@@ -1,5 +1,5 @@
 /**
- * P5+.1: Real daemon API bridge.
+ * P5+.1/P5+.2: Daemon API bridge.
  *
  * In production the Electron preload exposes `window.daedalusAPI`.
  * In browser dev mode (`npm run dev` without Electron), fall back to mock.
@@ -22,9 +22,22 @@ export interface TaskSummary {
   error_taxonomy?: string;
 }
 
+/** P5+.2: callbacks for dispatchTask. */
+export interface TaskCallbacks {
+  onStream?(chunk: string): void;
+  onDone?(outbox: unknown): void;
+  onError?(taxonomy: string, detail: string): void;
+  onPermissionRequest?(perm: unknown): void;
+}
+
 export interface DaedalusApi {
   getHealth(): Promise<HealthStatus>;
   listSessions(): Promise<TaskSummary[]>;
+  ping(): Promise<boolean>;
+  dispatchTask(
+    goal: string,
+    callbacks: TaskCallbacks,
+  ): Promise<{ taskId: string; reqId: string }>;
   approveGate(requestId: string): Promise<void>;
   rejectGate(requestId: string): Promise<void>;
   requestChanges(requestId: string): Promise<void>;
@@ -44,6 +57,13 @@ const mock: DaedalusApi = {
   async listSessions() {
     return [];
   },
+  async ping() {
+    return false;
+  },
+  async dispatchTask(_goal, callbacks) {
+    setTimeout(() => callbacks.onError?.("mock", "daemon not connected"), 500);
+    return { taskId: "mock-task", reqId: "mock-req" };
+  },
   async approveGate() {},
   async rejectGate() {},
   async requestChanges() {},
@@ -52,7 +72,6 @@ const mock: DaedalusApi = {
   },
 };
 
-/** Real API when running inside Electron, mock otherwise. */
 export function getApi(): DaedalusApi {
   if (window.daedalusAPI) return window.daedalusAPI;
   return mock;

@@ -122,6 +122,70 @@ function App() {
 
   function createGeneratedTab(kind: "chat" | "meeting" | "task", prompt: string) {
     const title = prompt.slice(0, 24) || (kind === "meeting" ? "新会议" : kind === "task" ? "新任务" : "新对话");
+
+    // P5+.2: real task dispatch via UDS.
+    if (kind === "task") {
+      const tabId = createId(kind);
+      const baseEvent: TimelineEvent = {
+        id: createId("event"),
+        agent: "用户",
+        tag: "目标",
+        time: nowLabel(),
+        body: prompt,
+      };
+      const tab: WorkTab = {
+        id: tabId, kind, type: "任务", title,
+        status: "运行中", statusType: "running", workspace: "Daedalus",
+        meta: ["执行者：自动选择", "Gate：按风险触发"],
+        goal: prompt,
+        messages: [baseEvent, {
+          id: createId("event"), agent: "Daedalus", tag: "回复", time: nowLabel(),
+          body: "正在连接 daemon...",
+        }],
+        approval: null,
+      };
+      setTabs((items) => [...items, tab]);
+      setOpenTabIds((ids) => [...ids, tabId]);
+      setActiveTabId(tabId);
+
+      const api = getApi();
+      api.dispatchTask(prompt, {
+        onStream(chunk) {
+          setTabs((items) => items.map((t) => {
+            if (t.id !== tabId) return t;
+            const last = t.messages[t.messages.length - 1];
+            if (last && last.tag === "stream") {
+              return { ...t, messages: [...t.messages.slice(0, -1), { ...last, body: last.body + chunk }] };
+            }
+            return { ...t, messages: [...t.messages, { id: createId("event"), agent: "Daedalus", tag: "stream", time: nowLabel(), body: chunk }] };
+          }));
+        },
+        onDone(_outbox) {
+          setTabs((items) => items.map((t) =>
+            t.id !== tabId ? t : { ...t, status: "完成", statusType: "done" }
+          ));
+        },
+        onError(taxonomy, detail) {
+          setTabs((items) => items.map((t) =>
+            t.id !== tabId ? t : {
+              ...t, status: taxonomy || "错误", statusType: "rejected",
+              messages: [...t.messages, { id: createId("event"), agent: "Daedalus", tag: "错误", time: nowLabel(), body: detail }],
+            }
+          ));
+        },
+        onPermissionRequest(_perm) {
+          // P5+.2: display only — P5+.3 will handle response.
+          setTabs((items) => items.map((t) =>
+            t.id !== tabId ? t : {
+              ...t,
+              approval: { id: createId("gate"), title: "Gate 审批", desc: "权限审批将在 P5+.3 接入（当前不回复）" },
+            }
+          ));
+        },
+      }).catch(() => {});
+      return;
+    }
+
     const baseEvent: TimelineEvent = {
       id: createId("event"),
       agent: "用户",
@@ -133,34 +197,26 @@ function App() {
     const tab: WorkTab = {
       id: createId(kind),
       kind,
-      type: kind === "meeting" ? "会议" : kind === "task" ? "任务" : "对话",
+      type: kind === "meeting" ? "会议" : "对话",
       title,
-      status: kind === "task" ? "运行中" : kind === "meeting" ? "运行中" : "对话",
-      statusType: kind === "task" || kind === "meeting" ? "running" : "normal",
+      status: kind === "meeting" ? "运行中" : "对话",
+      statusType: kind === "meeting" ? "running" : "normal",
       workspace: "Daedalus",
-      meta: kind === "meeting" ? ["Agent 会议", "4 个 Agent"] : kind === "task" ? ["执行者：自动选择", "Gate：按风险触发"] : ["Agent：自动选择"],
+      meta: kind === "meeting" ? ["Agent 会议", "4 个 Agent"] : ["Agent：自动选择"],
       goal: prompt,
       messages: [
         baseEvent,
         {
           id: createId("event"),
-          agent: kind === "meeting" ? "架构师" : kind === "task" ? "Daedalus" : "Daedalus",
+          agent: kind === "meeting" ? "架构师" : "Daedalus",
           tag: kind === "meeting" ? "开场" : "回复",
           time: nowLabel(),
           body: kind === "meeting"
             ? "我会先定义边界，再让 Codex 判断实现路径，最后由验证员给出 Gate 建议。"
-            : kind === "task"
-              ? "已根据任务目标选择 Codex 执行，Verifier 负责验收。"
-              : "收到。我会先按当前工作区上下文回答，也可以随时切换到会议或任务模式。"
+            : "收到。我会先按当前工作区上下文回答，也可以随时切换到会议或任务模式。"
         }
       ],
-      approval: kind === "task"
-        ? {
-            id: createId("gate"),
-            title: "Gate 暂未触发",
-            desc: "当前任务还没有高风险写入请求。"
-          }
-        : null
+      approval: null
     };
 
     setTabs((items) => [...items, tab]);
