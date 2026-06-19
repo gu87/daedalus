@@ -337,9 +337,6 @@ impl DaemonContext {
                             } => {
                                 retry_count += 1;
 
-                                // P5.3b: Running → Blocked.
-                                update_pipeline(&db_path, task_id.clone(), "blocked".into()).await;
-
                                 // New CancellationToken per attempt.
                                 let cancel = CancellationToken::new();
                                 // New IpcPermissionBroker per attempt.
@@ -419,7 +416,12 @@ impl DaemonContext {
                                 .await;
 
                                 match insert_result {
-                                    Ok(Ok(())) => {}
+                                    Ok(Ok(())) => {
+                                        // P5.3b: Running -> Blocked -> Dispatched -> Running
+                                        update_pipeline(&db_path, task_id.clone(), "blocked".into()).await;
+                                        update_pipeline(&db_path, task_id.clone(), "dispatched".into()).await;
+                                        update_pipeline(&db_path, task_id.clone(), "running".into()).await;
+                                    }
                                     Ok(Err(e)) => {
                                         let tid = task_id.clone();
                                         let _tid_r = tid.clone();
@@ -427,6 +429,7 @@ impl DaemonContext {
                                         let rid = req_id.clone();
                                         let detail =
                                             format!("failed to insert switch agent_runs row: {e}");
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                         let _ = crate::ipc::reliable::send_reliable_event(
                                             &writer_tx2,
                                             &ledger,
@@ -580,6 +583,7 @@ impl DaemonContext {
                                         let rid = req_id.clone();
                                         let detail =
                                             format!("failed to insert retry agent_runs row: {e}");
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                         let _ = crate::ipc::reliable::send_reliable_event(
                                             &writer_tx2,
                                             &ledger,
