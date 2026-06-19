@@ -1,6 +1,6 @@
 # P5+.3 实现完成报告：Gate / Permission 审批可用化
 
-> commit: 待提交
+> commits: `d6e01ed`, fixup: `35ef66d`
 
 ---
 
@@ -40,7 +40,7 @@
 ## 4. 验证
 
 ```
-npm run build  ✅ (219KB JS, 455ms)
+npm run build  ✅ (219KB JS, 498ms)
 ```
 
 ---

@@ -1832,3 +1832,33 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
 **验证**：`scripts/smoke-phase5.sh` ✅ 7/7 ALL PASSED
 
 **Phase 5 全部 [DONE]**
+
+---
+
+# Phase 5+ Dogfood 可用化
+
+> Phase 5 已封板。Phase 5+ 目标：Desktop ↔ daemon 连接，日常可用。
+
+## P5+.1 Desktop ↔ daemon 连接 + 在线状态 [DONE]
+
+> commit: ea707e5
+
+**核心交付**：preload `getHealth()` 真实 HTTP 调用，UI 显示 🟢/🔴，5s 轮询。
+
+## P5+.2 Desktop UDS bridge — task.dispatch [DONE]
+
+> commits: a1a3adb, fixups: 2a8d7f7, 9d1b854, 6e41dd0
+
+**核心交付**：preload Node `net` UDS NDJSON 客户端，`dispatchTask(goal, callbacks)` 真实 UDS 调用，TaskCard v2.8 构造，`DAEDALUS_DESKTOP_AGENT_ID` 环境变量。
+
+## P5+.3 Gate/Permission 审批可用化 [DONE]
+
+> commits: d6e01ed, fixup: 35ef66d
+
+**核心交付**：
+- `permission.request` → UI Gate 审批条
+- approve/reject/changes → `permission.response`（同一 UDS 连接）
+- changes 映射 `decision: "denied"`，UI 文案 "本轮按拒绝处理"
+- one-shot reply（`used` 标志防重复发送）
+- 多 tab Map 管理（`useRef<Map<permission_id, reply>>`）
+- 终态清理 pending approval（onDone/onError → delete + approval: null）
