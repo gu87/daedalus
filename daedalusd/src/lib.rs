@@ -7,5 +7,6 @@ pub mod gate;
 pub mod http;
 pub mod ipc;
 pub mod llm;
+pub mod pipeline;
 pub mod tools;
 pub mod types;
