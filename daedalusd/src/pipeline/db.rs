@@ -3,8 +3,6 @@
 //! All operations via `spawn_blocking` + short connections.
 //! `update_status` enforces `TaskStatus::transition` rules.
 
-use std::path::{Path, PathBuf};
-
 use rusqlite::params;
 
 use crate::error::DaedalusError;
@@ -101,7 +99,7 @@ pub fn update_status(
     };
 
     // Validate transition.
-    TaskStatus::transition(&current, &next).map_err(|e| DaedalusError::Protocol(e))?;
+    TaskStatus::transition(&current, &next).map_err(DaedalusError::Protocol)?;
 
     // Apply.
     conn.execute(
