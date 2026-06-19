@@ -1,6 +1,6 @@
 # P5+.2 完成报告：Desktop UDS bridge — task.dispatch 最小闭环
 
-> commits: `a1a3adb`, fixups: `2a8d7f7`, `c3e9f12`
+> commits: `a1a3adb`, fixups: `2a8d7f7`, `9d1b854`
 
 ---
 
@@ -40,5 +40,5 @@
 ## 4. 验证
 
 ```
-npm run build  ✅ (219KB JS, 507ms)
+npm run build  ✅ (219KB JS, 505ms)
 ```
