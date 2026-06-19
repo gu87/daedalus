@@ -164,17 +164,21 @@ function App() {
           }));
         },
         onDone(_outbox) {
-          setTabs((items) => items.map((t) =>
-            t.id !== tabId ? t : { ...t, status: "完成", statusType: "done" }
-          ));
+          setTabs((items) => items.map((t) => {
+            if (t.id !== tabId) return t;
+            if (t.approval?.id) permissionReplies.current.delete(t.approval.id);
+            return { ...t, status: "完成", statusType: "done", approval: null };
+          }));
         },
         onError(taxonomy, detail) {
-          setTabs((items) => items.map((t) =>
-            t.id !== tabId ? t : {
-              ...t, status: taxonomy || "错误", statusType: "rejected",
+          setTabs((items) => items.map((t) => {
+            if (t.id !== tabId) return t;
+            if (t.approval?.id) permissionReplies.current.delete(t.approval.id);
+            return {
+              ...t, status: taxonomy || "错误", statusType: "rejected", approval: null,
               messages: [...t.messages, { id: createId("event"), agent: "Daedalus", tag: "错误", time: nowLabel(), body: detail }],
-            }
-          ));
+            };
+          }));
         },
         onPermissionRequest(perm: any, reply) {
           // P5+.3: store reply and show approval bar.

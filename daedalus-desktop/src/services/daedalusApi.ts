@@ -68,19 +68,21 @@ const mock: DaedalusApi = {
     return false;
   },
   async dispatchTask(_goal, callbacks) {
-    setTimeout(() => callbacks.onError?.("mock", "daemon not connected"), 100);
-    // Mock permission to test reply object: after 2s, fire permission, then after
-    // user clicks approve (within 10s), simulate task done.
+    // Mock permission flow: after 500ms, fire permission.request.
+    // approve → onDone; reject/changes → onError.
     setTimeout(() => {
       if (callbacks.onPermissionRequest) {
         const reply = {
-          approve() { setTimeout(() => callbacks.onDone?.("mock-done"), 500); },
+          approve() { callbacks.onDone?.("mock-done"); },
           reject() { callbacks.onError?.("mock-rejected", "user rejected"); },
           requestChanges() { callbacks.onError?.("mock-changes", "changes requested (denied)"); },
         };
-        callbacks.onPermissionRequest({ permission_id: "mock-perm-1", req_id: "mock-req", tool: "test", args: {} }, reply);
+        callbacks.onPermissionRequest(
+          { permission_id: "mock-perm-1", req_id: "mock-req", tool: "test", args: {} },
+          reply,
+        );
       }
-    }, 2000);
+    }, 500);
     return { taskId: "mock-task", reqId: "mock-req" };
   },
   async approveGate() {},

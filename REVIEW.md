@@ -28,7 +28,16 @@
 
 ---
 
-## 3. 验证
+## 3. 返修记录
+
+| # | 修复 |
+|---|------|
+| 1 | onDone/onError 回调中清理 `permissionReplies` Map + 设置 `approval: null`（终态后不残留可点击的审批条） |
+| 2 | browser mock 改为纯 permission 流（不混发 onError + permission.request） |
+
+---
+
+## 4. 验证
 
 ```
 npm run build  ✅ (219KB JS, 455ms)
