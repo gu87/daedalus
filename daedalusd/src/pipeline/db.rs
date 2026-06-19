@@ -52,15 +52,23 @@ pub fn get_task(
         )
         .map_err(map_db_err)?;
 
+    #[derive(Debug)]
+    struct RawRow {
+        id: i64,
+        task_id: String,
+        agent_id: Option<String>,
+        status_str: String,
+        created_at: i64,
+        updated_at: i64,
+    }
+
     let mut rows = stmt
         .query_map(params![task_id], |row| {
-            let status_str: String = row.get(3)?;
-            let status = TaskStatus::parse_status(&status_str).unwrap_or(TaskStatus::Created);
-            Ok(TaskRow {
+            Ok(RawRow {
                 id: row.get(0)?,
                 task_id: row.get(1)?,
                 agent_id: row.get(2)?,
-                status,
+                status_str: row.get(3)?,
                 created_at: row.get(4)?,
                 updated_at: row.get(5)?,
             })
@@ -68,7 +76,23 @@ pub fn get_task(
         .map_err(map_db_err)?;
 
     match rows.next() {
-        Some(row) => Ok(Some(row.map_err(map_db_err)?)),
+        Some(row) => {
+            let raw = row.map_err(map_db_err)?;
+            let status = TaskStatus::parse_status(&raw.status_str).ok_or_else(|| {
+                DaedalusError::Protocol(format!(
+                    "invalid task status in DB: {}",
+                    raw.status_str
+                ))
+            })?;
+            Ok(Some(TaskRow {
+                id: raw.id,
+                task_id: raw.task_id,
+                agent_id: raw.agent_id,
+                status,
+                created_at: raw.created_at,
+                updated_at: raw.updated_at,
+            }))
+        }
         None => Ok(None),
     }
 }
@@ -99,7 +123,8 @@ pub fn update_status(
     };
 
     // Validate transition.
-    TaskStatus::transition(&current, &next).map_err(DaedalusError::Protocol)?;
+    TaskStatus::transition(&current, &next)
+        .map_err(DaedalusError::Protocol)?;
 
     // Apply.
     conn.execute(

@@ -77,9 +77,7 @@ impl TaskStatus {
                 "cannot transition from terminal state '{}'",
                 current.as_str()
             )),
-            // Self-transition: no-op.
-            (c, n) if c == n => Ok(next.clone()),
-            // Anything else is illegal.
+            // Anything else (including self-transition) is illegal.
             (c, n) => Err(format!(
                 "illegal transition: '{}' -> '{}'",
                 c.as_str(),
@@ -177,5 +175,11 @@ mod tests {
     #[test]
     fn transition_running_to_failed() {
         assert!(TaskStatus::transition(&TaskStatus::Running, &TaskStatus::Failed).is_ok());
+    }
+
+    #[test]
+    fn transition_self_rejected() {
+        assert!(TaskStatus::transition(&TaskStatus::Created, &TaskStatus::Created).is_err());
+        assert!(TaskStatus::transition(&TaskStatus::Running, &TaskStatus::Running).is_err());
     }
 }
