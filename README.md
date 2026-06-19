@@ -1,8 +1,8 @@
 # Daedalus — Agent OS
 
-Phase 4: Rust daemon (`daedalusd`) + Electron desktop (`daedalus-desktop`) + Python CLI (`daedalus`).
+Phase 5: Rust daemon (`daedalusd`) + Electron desktop (`daedalus-desktop`) + Python CLI (`daedalus`).
 
-## Phase 3–4 capabilities
+## Phase 3–5 capabilities
 
 ### Phase 3 — Gate & Quality System
 - **ErrorCode taxonomy** — 10 variants: Cancelled, TaskTimeout, ToolFailure, MaxIterations, ProviderExhausted, ProviderFatal, ModelNotFound, AuthFailure, RateLimited, Unknown
@@ -11,6 +11,12 @@ Phase 4: Rust daemon (`daedalusd`) + Electron desktop (`daedalus-desktop`) + Pyt
 - **ProviderError granularity** — `AgentError::error_code()` single source of truth, preserved through `LoopState::Failed`
 - **SemanticTag** — 6 tags (Permanent/Transient/NeedsHuman/PermissionDenied/ConfigurationError/ResourceExhausted), AND matching in Gate criteria
 - **SwitchAgent** — cross-agent dispatch sharing the same retry loop as AutoRevision
+
+### Phase 5 — DAEDALUS.md, Durable Execution & Pipeline
+- **DAEDALUS.md** — project-level agent instructions injected into system prompt (`[soul] → [daedalus] → [memory]`)
+- **Durable Execution** — `system.ack` / event ledger (`events` table) / `session.rejoin` replay
+- **Pipeline** — `TaskStatus` 9-state lifecycle + `tasks` table + daemon event wiring (12 update points)
+- **daedalus-desktop** — Electron + React UI skeleton (mock data, no real IPC yet)
 
 ### Phase 4 — HTTP API & Observability
 - **`GET /api/health`** — daemon status, uptime, DB connectivity
@@ -63,6 +69,7 @@ daedalus ping --socket /tmp/test.sock
 | `DAEDALUS_SKILLS_DIR` | `~/.hermes/skills` | Skill markdown files |
 | `DAEDALUS_MODELS_YAML` | `~/.daedalus/models.yaml` | Model pool config |
 | `DAEDALUS_GATE_CRITERIA_PATH` | `~/.daedalus/config/gate-criteria.yaml` | Gate routing override |
+| `DAEDALUS_MD_PATH` | `./DAEDALUS.md` | Project-level agent instructions |
 
 ## Development verification
 
@@ -81,6 +88,9 @@ scripts/smoke-phase2.sh
 
 # Phase 4 HTTP API smoke (requires Python 3)
 scripts/smoke-phase4.sh
+
+# Phase 5 smoke
+scripts/smoke-phase5.sh
 
 # daedalus-desktop
 cd daedalus-desktop && npm run build
@@ -140,11 +150,11 @@ cd daedalus-desktop && npm run build
  └────────────────────────────────────────────────┘
 ```
 
-## What Phase 4 does NOT include
+## What Phase 5 does NOT include
 
-- Credential hot-reload / Gemini / Cohere providers → Phase 4+
-- gate-criteria.yaml hot-reload → Phase 4+
+- Ω-Agent / MCP Bridge / cross-task DAG → Phase 5+
+- Pipeline execution engine
 - WebSocket / SSE real-time push
 - Task cancel / retry API
 - daedalus-desktop real IPC / backend integration
-- system.ack / event replay / pipeline / Omega → Phase 5
+- Credential hot-reload / Gemini / Cohere providers → Phase 5+
