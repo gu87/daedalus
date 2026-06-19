@@ -184,6 +184,38 @@ impl DaemonContext {
             }
         }
 
+        // P5.3b: create pipeline task (only after build + insert succeeded).
+        {
+            let dbp = self.db_path.clone();
+            let tid = task_id.clone();
+            let aid = initial_agent_id.clone();
+            let t = now;
+            let result = tokio::task::spawn_blocking(move || {
+                let conn = pool::open(&dbp)
+                    .map_err(|e| DaedalusError::Database(format!("{e}")))?;
+                // Created → Dispatched → Running
+                crate::pipeline::db::insert_task(&conn, &tid, Some(&aid), t)?;
+                crate::pipeline::db::update_status(&conn, &tid, "dispatched", t)?;
+                crate::pipeline::db::update_status(&conn, &tid, "running", t)
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "daedalusd pipeline: failed to create task {}: {e}",
+                        task_id
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "daedalusd pipeline: spawn_blocking panic creating task {}",
+                        task_id
+                    );
+                }
+            }
+        }
+
         // ── 4. Spawn agent execution with Gate retry loop (P3.4/P3.7) ──
         let db_path = self.db_path.clone();
         let gate_router = Arc::clone(&self.gate_router);
@@ -192,6 +224,35 @@ impl DaemonContext {
         let writer_tx2 = writer_tx.clone();
 
         tokio::spawn(async move {
+            // P5.3b helper: update pipeline task status.
+            let update_pipeline = |dbp: &std::path::Path, tid: String, status: String| {
+                let dbp = dbp.to_path_buf();
+                let tid2 = tid.clone();
+                let status2 = status.clone();
+                async move {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let result = tokio::task::spawn_blocking(move || {
+                        let conn = crate::db::pool::open(&dbp)
+                            .map_err(|e| DaedalusError::Database(format!("{e}")))?;
+                        crate::pipeline::db::update_status(&conn, &tid, &status, now)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            eprintln!(
+                                "daedalusd pipeline: update {} -> {} failed: {e}",
+                                tid2, status2
+                            );
+                        }
+                        Err(_) => {}
+                    }
+                }
+            };
+
             let mut retry_count: u32 = 0;
             let mut current_agent_id = initial_agent_id;
             let mut prev_run_id = first_run_id.clone();
@@ -229,6 +290,7 @@ impl DaemonContext {
                             },
                         )
                         .await;
+                        update_pipeline(&db_path, task_id.clone(), "waiting_for_verification".into()).await;
                         break;
                     }
                     Err(agent_error) => {
@@ -267,12 +329,16 @@ impl DaemonContext {
                                     },
                                 )
                                 .await;
+                                update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                 break;
                             }
                             GateAction::SwitchAgent {
                                 agent_id: target_agent_id,
                             } => {
                                 retry_count += 1;
+
+                                // P5.3b: Running → Blocked.
+                                update_pipeline(&db_path, task_id.clone(), "blocked".into()).await;
 
                                 // New CancellationToken per attempt.
                                 let cancel = CancellationToken::new();
@@ -316,6 +382,7 @@ impl DaemonContext {
                                                 },
                                             )
                                             .await;
+                                            update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                             break;
                                         }
                                     };
@@ -468,6 +535,7 @@ impl DaemonContext {
                                                 },
                                             )
                                             .await;
+                                            update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                             break;
                                         }
                                     };

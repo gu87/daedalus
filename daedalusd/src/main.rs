@@ -85,17 +85,43 @@ async fn main() {
                     match tokio::task::spawn_blocking({
                         let db_path = orphan_db.clone();
                         move || {
-                            let conn = daedalusd::db::pool::open(&db_path)?;
-                            daedalusd::db::orphan::scan_orphans(&conn, cutoff)
+                            let conn = daedalusd::db::pool::open(&db_path)
+                                .map_err(|e| daedalusd::error::DaedalusError::Database(format!("{e}")))?;
+                            let orphaned =
+                                daedalusd::db::orphan::scan_orphans(&conn, cutoff)
+                                .map_err(|e| daedalusd::error::DaedalusError::Database(format!("{e}")))?;
+                            // P5.3b: update pipeline tasks to Failed.
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+                            let mut task_failures = 0u32;
+                            for (_run_id, task_id) in &orphaned {
+                                match daedalusd::pipeline::db::update_status(
+                                    &conn, task_id, "failed", now,
+                                ) {
+                                    Ok(()) => task_failures += 1,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "daedalusd orphan: pipeline update failed for {}: {e}",
+                                            task_id
+                                        );
+                                    }
+                                }
+                            }
+                            Ok::<_, daedalusd::error::DaedalusError>((
+                                orphaned, task_failures,
+                            ))
                         }
                     })
                     .await
                     {
-                        Ok(Ok(ids)) if !ids.is_empty() => {
+                        Ok(Ok((orphaned, tasks))) if !orphaned.is_empty() => {
                             eprintln!(
-                                "daedalusd orphaned {} run(s): {:?}",
-                                ids.len(),
-                                ids
+                                "daedalusd orphaned {} run(s) ({} tasks→failed): {:?}",
+                                orphaned.len(),
+                                tasks,
+                                orphaned.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>()
                             );
                         }
                         Ok(Err(e)) => {
