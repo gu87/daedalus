@@ -1,6 +1,6 @@
 # P5+.2 完成报告：Desktop UDS bridge — task.dispatch 最小闭环
 
-> commits: `a1a3adb`, fixup: 待提交
+> commits: `a1a3adb`, fixups: `2a8d7f7`, `c3e9f12`
 
 ---
 
@@ -23,6 +23,7 @@
 | 1 | task.done/error 后 `_close` 误报 `connection_lost` | 增加 `settled` 标志，终端事件先 `settle()` 再 `close()`；`_close`/`_error` 仅在 `!settled` 时回调 |
 | 2 | `chunk.toString()` 不处理 UTF-8 跨 chunk | 引入 `StringDecoder("utf8")`，`decoder.write(chunk)` 安全拼接 |
 | 3 | `ping` 可能 double-resolve | 增加 `resolved` 标志，`done()` wrapper 防止重复 resolve |
+| 4 | `_error` 回调后 `_close` 再触发 `connection_lost` | `_error` handler 中先 `conn.settle()` 再 `onError`，阻止二次回调 |
 
 ---
 

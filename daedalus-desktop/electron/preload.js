@@ -204,6 +204,7 @@ contextBridge.exposeInMainWorld("daedalusAPI", {
       });
 
       conn.on("_error", (code, detail) => {
+        conn.settle();
         if (callbacks.onError) callbacks.onError(code, detail);
         conn.close();
       });
