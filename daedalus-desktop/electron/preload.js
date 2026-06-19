@@ -199,8 +199,49 @@ contextBridge.exposeInMainWorld("daedalusAPI", {
       });
 
       conn.on("permission.request", (msg) => {
-        // P5+.2: display only, do not reply.  P5+.3 will handle response.
-        if (callbacks.onPermissionRequest) callbacks.onPermissionRequest(msg);
+        // P5+.3: create one-shot reply, do NOT settle — connection stays open.
+        if (!msg.permission_id) {
+          console.warn("[daedalusAPI] permission.request missing permission_id");
+          return;
+        }
+        let used = false;
+        const reply = {
+          approve() {
+            if (used) return;
+            used = true;
+            conn.send({
+              type: "permission.response",
+              ts: nowISO(),
+              permission_id: msg.permission_id,
+              req_id: msg.req_id,
+              decision: "approved",
+            });
+          },
+          reject() {
+            if (used) return;
+            used = true;
+            conn.send({
+              type: "permission.response",
+              ts: nowISO(),
+              permission_id: msg.permission_id,
+              req_id: msg.req_id,
+              decision: "denied",
+            });
+          },
+          requestChanges() {
+            // P5+.3: mapped to "denied".  UI copy explains this.
+            if (used) return;
+            used = true;
+            conn.send({
+              type: "permission.response",
+              ts: nowISO(),
+              permission_id: msg.permission_id,
+              req_id: msg.req_id,
+              decision: "denied",
+            });
+          },
+        };
+        if (callbacks.onPermissionRequest) callbacks.onPermissionRequest(msg, reply);
       });
 
       conn.on("_error", (code, detail) => {
@@ -210,7 +251,7 @@ contextBridge.exposeInMainWorld("daedalusAPI", {
       });
 
       conn.on("_close", () => {
-        // If we get here without done/error, something went wrong.
+        // Connection lost before terminal event.
         if (callbacks.onError)
           callbacks.onError("connection_lost", "daemon connection closed unexpectedly");
       });

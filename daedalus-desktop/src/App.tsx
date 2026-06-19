@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { initialTabs, workspaces as initialWorkspaces } from "./data/mockData";
 import { getApi } from "./services/daedalusApi";
@@ -31,6 +31,9 @@ function App() {
 
   // P5+.1: daemon online status.
   const [daemonOnline, setDaemonOnline] = useState(false);
+
+  // P5+.3: pending permission replies, keyed by permission_id.
+  const permissionReplies = useRef<Map<string, { approve(): void; reject(): void; requestChanges(): void }>>(new Map());
 
   useEffect(() => {
     const api = getApi();
@@ -173,12 +176,17 @@ function App() {
             }
           ));
         },
-        onPermissionRequest(_perm) {
-          // P5+.2: display only — P5+.3 will handle response.
+        onPermissionRequest(perm: any, reply) {
+          // P5+.3: store reply and show approval bar.
+          permissionReplies.current.set(perm.permission_id, reply);
           setTabs((items) => items.map((t) =>
             t.id !== tabId ? t : {
               ...t,
-              approval: { id: createId("gate"), title: "Gate 审批", desc: "权限审批将在 P5+.3 接入（当前不回复）" },
+              approval: {
+                id: perm.permission_id,
+                title: `Gate 审批: ${perm.tool || "tool"}`,
+                desc: JSON.stringify(perm.args || {}),
+              },
             }
           ));
         },
@@ -250,11 +258,20 @@ function App() {
   }
 
   function decideApproval(tabId: string, approval: ApprovalRequest, decision: "approve" | "reject" | "changes") {
+    // P5+.3: send permission.response via saved one-shot reply.
+    const reply = permissionReplies.current.get(approval.id);
+    if (reply) {
+      permissionReplies.current.delete(approval.id);
+      if (decision === "approve") reply.approve();
+      else if (decision === "reject") reply.reject();
+      else reply.requestChanges();
+    }
+
     const body = decision === "approve"
       ? "已批准。Gate 放行，任务可以继续执行。"
       : decision === "reject"
         ? "已拒绝。任务停止，不再写入文件。"
-        : "已要求修改。Codex 需要调整范围后重新提交。";
+        : "已要求修改（本轮按拒绝处理）。自动修订留到后续版本。";
 
     setTabs((items) =>
       items.map((tab) => {
