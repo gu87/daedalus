@@ -1736,7 +1736,7 @@ P5.2  Durable Execution (system.ack + event ledger + session.rejoin) [DONE]
 P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
   │     (独立于 P5.1/P5.2)
   │
-  └─→ P5.3b（见上）→ P5.4 Phase 5 验收
+  └─→ P5.3b（见上）→ P5.4 Phase 5 验收 [DONE] (663dae4)
 ```
 
 ## P5.1 DAEDALUS.md 项目指令源 [DONE]
@@ -1818,3 +1818,17 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
 - orphan scan 返回 (run_id, task_id)，main.rs 更新 tasks→Failed
 
 **测试**：4 pipeline_daemon + 23 db_registry passed，clippy clean
+
+## P5.4 Phase 5 验收收口 [DONE]
+
+> commit: 663dae4
+
+**目标**：全链路验收 + README 更新 + smoke 脚本 + 范围审计。
+
+**交付**：
+- `README.md` Phase 5 能力更新（DAEDALUS.md、Durable Execution、Pipeline）
+- `scripts/smoke-phase5.sh` 7 步全链路验收
+
+**验证**：`scripts/smoke-phase5.sh` ✅ 7/7 ALL PASSED
+
+**Phase 5 全部 [DONE]**
