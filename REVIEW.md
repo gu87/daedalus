@@ -1,54 +1,43 @@
-# P5+.2 实现完成报告：Desktop UDS bridge — task.dispatch 最小闭环
+# P5+.2 完成报告：Desktop UDS bridge — task.dispatch 最小闭环
 
-> commit: 待提交
+> commits: `a1a3adb`, fixup: 待提交
 
 ---
 
-## 1. 修改文件清单
+## 1. 修改文件
 
-| 文件 | 操作 | 变更摘要 |
-|------|:---:|------|
-| `daedalus-desktop/electron/preload.js` | 修改 | UDS NDJSON 客户端（`udsConnect` + `buildTaskDispatch`）；`ping()` / `dispatchTask()` 改为真实 UDS；`DAEDALUS_DESKTOP_AGENT_ID` 环境变量 |
-| `daedalus-desktop/src/services/daedalusApi.ts` | 修改 | 类型更新：`TaskCallbacks`、`dispatchTask` 返回 `Promise<{taskId, reqId}>` |
-| `daedalus-desktop/src/App.tsx` | 修改 | `createGeneratedTab("task")` 调真实 `dispatchTask` + `onStream/onDone/onError/onPermissionRequest` 回调 |
-| `daedalus-desktop/src/components/AppShell.tsx` | 未改 | — |
+| 文件 | 操作 |
+|------|:---:|
+| `daedalus-desktop/electron/preload.js` | UDS NDJSON 客户端 + dispatchTask + ping |
+| `daedalus-desktop/src/services/daedalusApi.ts` | TaskCallbacks 类型 |
+| `daedalus-desktop/src/App.tsx` | createGeneratedTab("task") 真实 dispatch |
 
 **不改**：daedalusd、IPC 协议、HTTP API、UI 布局
 
 ---
 
-## 2. API 变更
+## 2. 返修记录
 
-| 方法 | P5+.1 | P5+.2 |
-|------|:---:|:---:|
-| `getHealth()` | ✅ HTTP real | ✅ |
-| `listSessions()` | ✅ HTTP real | ✅ |
-| `ping()` | — | **✅ UDS** |
-| `dispatchTask(goal, callbacks)` | — | **✅ UDS** → `{taskId, reqId}` |
-| `approveGate/rejectGate/requestChanges` | mock | mock（P5+.3） |
+| # | 问题 | 修复 |
+|---|------|------|
+| 1 | task.done/error 后 `_close` 误报 `connection_lost` | 增加 `settled` 标志，终端事件先 `settle()` 再 `close()`；`_close`/`_error` 仅在 `!settled` 时回调 |
+| 2 | `chunk.toString()` 不处理 UTF-8 跨 chunk | 引入 `StringDecoder("utf8")`，`decoder.write(chunk)` 安全拼接 |
+| 3 | `ping` 可能 double-resolve | 增加 `resolved` 标志，`done()` wrapper 防止重复 resolve |
 
 ---
 
-## 3. 验证
+## 3. 环境变量
 
-```
-npm run build  ✅ (219KB JS, 456ms)
-```
-
-- Agent ID from `DAEDALUS_DESKTOP_AGENT_ID` env var（默认 `daedalus-desktop`）
-- TaskCard v2.8：`req_id`/`task_id` 由 preload 生成，`agent_id` 与 `execution_plan.primary_agent` 一致
-- UDS NDJSON 客户端：按 `\n` 分帧，`JSON.parse` 错误 → `onError("protocol_error")`，socket error → `onError("connection_error")`，EOF 未终态 → `onError("connection_lost")`
-- `permission.request` 只显示（`onPermissionRequest` 回调），**不回复**，提示 "P5+.3 接入"
+| 变量 | 默认值 | 用途 |
+|------|--------|------|
+| `DAEDALUSD_SOCK` | `/tmp/daedalusd.sock` | UDS socket 路径 |
+| `DAEDALUSD_HTTP_ADDR` | `http://127.0.0.1:9800` | HTTP health API |
+| `DAEDALUS_DESKTOP_AGENT_ID` | `daedalus-desktop` | Agent ID（需 managed-agents.yaml 中存在同名 agent，或启动时设置） |
 
 ---
 
-## 4. 不做清单
+## 4. 验证
 
-| 约束 | 状态 |
-|------|:---:|
-| session.rejoin / ack / 重连 | ✅ |
-| permission.response 发送 | ✅ — P5+.3 |
-| 高级 TaskCard 编辑 | ✅ |
-| 修改 daemon | ✅ |
-| 修改 IPC 协议 | ✅ |
-| 修改 UI 布局 | ✅ |
+```
+npm run build  ✅ (219KB JS, 507ms)
+```

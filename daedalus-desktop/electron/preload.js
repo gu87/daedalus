@@ -4,6 +4,7 @@
 
 const { contextBridge } = require("electron");
 const net = require("net");
+const { StringDecoder } = require("string_decoder");
 
 const DAEMON_HTTP_ADDR =
   process.env.DAEDALUSD_HTTP_ADDR || "http://127.0.0.1:9800";
@@ -18,10 +19,14 @@ const DESKTOP_AGENT_ID =
 
 function udsConnect(socketPath) {
   const socket = net.createConnection(socketPath);
+  const decoder = new StringDecoder("utf8");
   let buf = "";
   let closed = false;
+  let settled = false;  // terminal received → no more _close/_error callbacks
 
   const handlers = {};
+
+  function settle() { settled = true; }
 
   function onMessage(line) {
     let msg;
@@ -31,33 +36,32 @@ function udsConnect(socketPath) {
     if (!type) return { error: "protocol_error", detail: "missing type field" };
     if (handlers[type]) return handlers[type](msg);
     if (handlers["*"]) return handlers["*"](msg);
-    // Unknown message type: ignore silently.
     return null;
   }
 
   socket.on("data", (chunk) => {
-    buf += chunk.toString();
+    buf += decoder.write(chunk);
     while (buf.includes("\n")) {
       const nl = buf.indexOf("\n");
       const line = buf.substring(0, nl);
       buf = buf.substring(nl + 1);
       const result = onMessage(line);
       if (result && result.error) {
-        if (handlers._error) handlers._error(result.error, result.detail);
+        if (!settled && handlers._error) handlers._error(result.error, result.detail);
         if (!closed) { socket.destroy(); closed = true; }
       }
     }
   });
 
   socket.on("error", (err) => {
-    if (!closed && handlers._error)
+    if (!settled && !closed && handlers._error)
       handlers._error("connection_error", err.message);
     closed = true;
   });
 
   socket.on("close", () => {
     closed = true;
-    if (handlers._close) handlers._close();
+    if (!settled && handlers._close) handlers._close();
   });
 
   return {
@@ -65,6 +69,7 @@ function udsConnect(socketPath) {
     on(type, fn) { handlers[type] = fn; },
     send(obj) { if (!closed) socket.write(JSON.stringify(obj) + "\n"); },
     close() { if (!closed) { socket.destroy(); closed = true; } },
+    settle,
   };
 }
 
@@ -144,14 +149,16 @@ contextBridge.exposeInMainWorld("daedalusAPI", {
   // ── Ping (P5+.2) ──────────────────────────────────────────────────────
   ping: () => {
     return new Promise((resolve) => {
+      let resolved = false;
+      const done = (v) => { if (!resolved) { resolved = true; resolve(v); } };
       try {
         const conn = udsConnect(DAEMON_SOCK);
-        const timer = setTimeout(() => { conn.close(); resolve(false); }, 3000);
-        conn.on("system.pong", () => { clearTimeout(timer); conn.close(); resolve(true); });
-        conn.on("_error", () => { clearTimeout(timer); resolve(false); });
-        conn.on("_close", () => { clearTimeout(timer); resolve(false); });
+        const timer = setTimeout(() => { conn.close(); done(false); }, 3000);
+        conn.on("system.pong", () => { clearTimeout(timer); conn.close(); done(true); });
+        conn.on("_error", () => { clearTimeout(timer); done(false); });
+        conn.on("_close", () => { clearTimeout(timer); done(false); });
         conn.send({ type: "system.ping", ts: nowISO(), req_id: "ping-" + Date.now() });
-      } catch { resolve(false); }
+      } catch { done(false); }
     });
   },
 
@@ -172,17 +179,20 @@ contextBridge.exposeInMainWorld("daedalusAPI", {
       });
 
       conn.on("task.done", (msg) => {
+        conn.settle();
         if (callbacks.onDone) callbacks.onDone(msg.outbox);
         conn.close();
       });
 
       conn.on("task.error", (msg) => {
+        conn.settle();
         if (callbacks.onError)
           callbacks.onError(msg.error_taxonomy || "unknown", msg.detail || "");
         conn.close();
       });
 
       conn.on("system.error", (msg) => {
+        conn.settle();
         if (callbacks.onError)
           callbacks.onError("system_error", msg.detail || JSON.stringify(msg));
         conn.close();
