@@ -1730,7 +1730,8 @@ P5.1  DAEDALUS.md 项目指令源 [DONE] (07fb756, fixups: 72de9ac, d790b6f, bb9
 P5.2  Durable Execution (system.ack + event ledger + session.rejoin) [DONE]
   │     (f5b6b29, fixups: 353744c, 2020275, c8c2340, a2dcbff, 8691a49, 15f64a9)
   │     │
-  │     └─→ P5.3b Pipeline ↔ daemon/Gate/Durable Events 接线
+  │     └─→ P5.3b Pipeline ↔ daemon/Gate/Durable Events 接线 [DONE]
+  │           (1c19ace, fixups: 53070d1, 915c527, 2f4d832, a3b15ba)
   │
 P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
   │     (独立于 P5.1/P5.2)
@@ -1802,3 +1803,18 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
 **测试**：17 passed（11 status + 6 pipeline_db），clippy clean
 
 **不做**：pipeline 执行、daemon/Gate/Durable Events 接线 → P5.3b
+
+## P5.3b Pipeline ↔ daemon/Gate/Durable Events 接线 [DONE]
+
+> commits: 1c19ace, fixups: 53070d1, 915c527, 2f4d832, a3b15ba
+
+**目标**：将 tasks 表接入 daemon 生命周期、Gate 路由、Durable Events。
+
+**核心能力**：
+- 首次 dispatch build+insert 成功 → insert_task(Created→Dispatched→Running)
+- TaskDone → WaitingForVerification；HardStop → Failed
+- SwitchAgent 成功 → Running→Blocked→Dispatched→Running
+- 全部 12 个失败路径 → Failed（send_reliable_event → update_pipeline 顺序）
+- orphan scan 返回 (run_id, task_id)，main.rs 更新 tasks→Failed
+
+**测试**：4 pipeline_daemon + 23 db_registry passed，clippy clean
