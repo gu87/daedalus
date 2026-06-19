@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { initialTabs, workspaces as initialWorkspaces } from "./data/mockData";
+import { getApi } from "./services/daedalusApi";
 import type { ApprovalRequest, RightToolKind, TimelineEvent, ViewKind, WorkTab, Workspace } from "./types";
 import { createId, nowLabel } from "./utils/time";
 
@@ -27,6 +28,21 @@ function App() {
 
   const [rightToolTabs, setRightToolTabs] = useState<RightToolKind[]>([]);
   const [activeRightTool, setActiveRightTool] = useState<RightToolKind | null>(null);
+
+  // P5+.1: daemon online status.
+  const [daemonOnline, setDaemonOnline] = useState(false);
+
+  useEffect(() => {
+    const api = getApi();
+    let stop = false;
+    const check = async () => {
+      const health = await api.getHealth();
+      if (!stop) setDaemonOnline(health.status === "ok");
+    };
+    check();
+    const interval = setInterval(check, 5000);
+    return () => { stop = true; clearInterval(interval); };
+  }, []);
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0], [activeTabId, tabs]);
   const openTabs = useMemo(() => openTabIds.map((id) => tabs.find((tab) => tab.id === id)).filter(Boolean) as WorkTab[], [openTabIds, tabs]);
@@ -261,6 +277,7 @@ function App() {
       onOpenRightTool={openRightTool}
       onActivateRightTool={setActiveRightTool}
       onCloseRightTool={closeRightTool}
+      daemonOnline={daemonOnline}
     />
   );
 }

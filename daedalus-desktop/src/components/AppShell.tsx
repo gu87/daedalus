@@ -31,6 +31,7 @@ type Props = {
   onOpenRightTool: (tool: RightToolKind) => void;
   onActivateRightTool: (tool: RightToolKind | null) => void;
   onCloseRightTool: (tool: RightToolKind) => void;
+  daemonOnline: boolean;
 };
 
 export function AppShell(props: Props) {
@@ -42,6 +43,14 @@ export function AppShell(props: Props) {
 
   return (
     <div className={classes}>
+      <div style={{
+        position: "fixed", top: 0, right: 12, zIndex: 999,
+        fontSize: 12, padding: "2px 8px", borderRadius: 4,
+        background: props.daemonOnline ? "#e6ffe6" : "#ffe6e6",
+        color: props.daemonOnline ? "#1a7a1a" : "#a11",
+      }}>
+        {props.daemonOnline ? "🟢 daemon" : "🔴 daemon"}
+      </div>
       <LeftSidebar
         workspaces={props.workspaces}
         activeWorkspaceId={props.activeWorkspaceId}
