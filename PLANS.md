@@ -1732,7 +1732,8 @@ P5.2  Durable Execution (system.ack + event ledger + session.rejoin) [DONE]
   │     │
   │     └─→ P5.3b Pipeline ↔ daemon/Gate/Durable Events 接线
   │
-P5.3a TaskStatus + tasks 表 + 基础 CRUD（独立于 P5.1/P5.2）
+P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
+  │     (独立于 P5.1/P5.2)
   │
   └─→ P5.3b（见上）→ P5.4 Phase 5 验收
 ```
@@ -1785,3 +1786,19 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD（独立于 P5.1/P5.2）
 - 15f64a9：workspace 434 passed 确认
 
 **不做**：未 ack 超时重发、global event_id、disk queue、peer.rs ledger
+
+## P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE]
+
+> commits: e35e1b1, fixup: f458671
+
+**目标**：新增 Pipeline 层 TaskStatus（9 状态）、tasks 表（migration v3）、基础 CRUD。
+
+**核心能力**：
+- `TaskStatus` 9 状态枚举 + `transition()` 转换规则（self-transition 拒绝）
+- `tasks` 表（共享 daedalusd.sqlite）：task_id UNIQUE, status CHECK, idx_tasks_status
+- `insert_task` / `get_task` / `update_status`（内部执行 transition 校验）
+- `get_task` 拒绝非法 DB status（不静默 fallback）
+
+**测试**：17 passed（11 status + 6 pipeline_db），clippy clean
+
+**不做**：pipeline 执行、daemon/Gate/Durable Events 接线 → P5.3b
