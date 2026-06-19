@@ -206,14 +206,36 @@ async fn orphan_scanner_updates_tasks_to_failed() {
 async fn switch_agent_transitions_via_blocked() {
     let dir = tempfile::TempDir::new().unwrap();
     let (cfg, db_path) = setup(&dir);
-    // agent-A: boom → fail. agent-B: text "ok".
-    // We use a factory that always builds with the same provider for simplicity.
-    // The key is that SwitchAgent path triggers Blocked→Dispatched→Running→WaitingForVerification.
-    let provider = Arc::new(TextProvider { chunks: vec![
-        vec![Ok(StreamChunk::ToolCall { id: "t1".into(), name: "boom".into(), input: serde_json::json!({}) })],
-        vec![Ok(StreamChunk::ToolCall { id: "t1".into(), name: "boom".into(), input: serde_json::json!({}) })],
-        vec![Ok(StreamChunk::Text { content: "ok".into() })],
-    ] });
+    // Stateful provider: first call fails (boom), second succeeds (text).
+    struct CounterProvider {
+        count: std::sync::Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl LLMProvider for CounterProvider {
+        async fn chat(&self, _: &[ChatMessage], _: &[ToolDef], _: &ModelConfig)
+            -> Result<ChatResponse, daedalusd::error::ProviderError> {
+            let mut c = self.count.lock().unwrap();
+            *c += 1;
+            if *c <= 2 {
+                Ok(ChatResponse { content: String::new(), tool_calls: vec![ToolCall { id: "t1".into(), name: "boom".into(), input: serde_json::json!({}) }] })
+            } else {
+                Ok(ChatResponse { content: "ok".into(), tool_calls: vec![] })
+            }
+        }
+        async fn stream(&self, messages: &[ChatMessage], tools: &[ToolDef], cfg: &ModelConfig)
+            -> Result<StreamHandle, daedalusd::error::ProviderError> {
+            let resp = self.chat(messages, tools, cfg).await?;
+            let (tx, handle) = stream_channel();
+            if !resp.content.is_empty() {
+                let _ = tx.send(Ok(StreamChunk::Text { content: resp.content })).await;
+            }
+            for tc in &resp.tool_calls {
+                let _ = tx.send(Ok(StreamChunk::ToolCall { id: tc.id.clone(), name: tc.name.clone(), input: tc.input.clone() })).await;
+            }
+            Ok(handle)
+        }
+    }
+    let provider: Arc<dyn LLMProvider> = Arc::new(CounterProvider { count: std::sync::Mutex::new(0) });
     struct BoomTool;
     #[async_trait::async_trait]
     impl daedalusd::tools::Tool for BoomTool {
