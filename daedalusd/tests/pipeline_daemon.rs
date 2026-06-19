@@ -127,7 +127,7 @@ fn read_task_status(db_path: &std::path::Path, task_id: &str) -> Option<TaskStat
 }
 
 #[tokio::test]
-async fn dispatch_creates_task_and_transitions_to_running() {
+async fn dispatch_success_eventually_waiting_for_verification() {
     let dir = tempfile::TempDir::new().unwrap();
     let (cfg, db_path) = setup(&dir);
     let provider = Arc::new(TextProvider { chunks: vec![vec![Ok(StreamChunk::Text { content: "ok".into() })]] });
@@ -137,11 +137,13 @@ async fn dispatch_creates_task_and_transitions_to_running() {
     let (tx, mut rx) = mpsc::channel(8);
     let result = ctx.spawn_task(&td, tx, Arc::new(SessionState::new())).await;
     assert!(result.is_none());
-    let _msg = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+    assert!(matches!(msg, Message::TaskDone(_)), "expected TaskDone, got {msg:?}");
+    // Wait briefly for the async pipeline update to complete.
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let status = read_task_status(&db_path, "pipe-test-task");
-    // Task is at least Running (build+insert succeeded).
-    assert!(status == Some(TaskStatus::Running) || status == Some(TaskStatus::WaitingForVerification),
-        "expected Running or WaitingForVerification, got {status:?}");
+    assert_eq!(status, Some(TaskStatus::WaitingForVerification),
+        "expected WaitingForVerification after TaskDone, got {status:?}");
 }
 
 #[tokio::test]
@@ -168,7 +170,9 @@ async fn task_error_hardstop_transitions_to_failed() {
     let (tx, mut rx) = mpsc::channel(8);
     let result = ctx.spawn_task(&td, tx, Arc::new(SessionState::new())).await;
     assert!(result.is_none());
-    let _msg = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+    assert!(matches!(msg, Message::TaskError(_)), "expected TaskError, got {msg:?}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let status = read_task_status(&db_path, "pipe-test-task");
     assert_eq!(status, Some(TaskStatus::Failed));
 }
@@ -207,6 +211,7 @@ async fn switch_agent_transitions_via_blocked() {
     // The key is that SwitchAgent path triggers Blocked→Dispatched→Running→WaitingForVerification.
     let provider = Arc::new(TextProvider { chunks: vec![
         vec![Ok(StreamChunk::ToolCall { id: "t1".into(), name: "boom".into(), input: serde_json::json!({}) })],
+        vec![Ok(StreamChunk::ToolCall { id: "t1".into(), name: "boom".into(), input: serde_json::json!({}) })],
         vec![Ok(StreamChunk::Text { content: "ok".into() })],
     ] });
     struct BoomTool;
@@ -224,15 +229,16 @@ async fn switch_agent_transitions_via_blocked() {
     let factory = Arc::new(PipeTestFactory { provider, tools: vec![Arc::new(BoomTool), Arc::new(daedalusd::tools::task_done::TaskDoneTool)], config: cfg.clone() });
     // Write gate criteria: tool_failure → switch_agent to same agent (just to trigger the path).
     let yaml_path = cfg.gate_criteria_path.clone();
-    std::fs::write(&yaml_path, "rules:\n  - error_code: tool_failure\n    action: switch_agent\n    target_agent: test-agent\n    max_retries: 1\n    reason: test switch\n").unwrap();
+    std::fs::write(&yaml_path, "rules:\n  - error_code: tool_failure\n    action: switch_agent\n    target_agent: test-agent\n    max_retries: 3\n    reason: test switch\n").unwrap();
     let registry = CriteriaRegistry::with_overrides(&yaml_path).unwrap();
     let ctx = Arc::new(DaemonContext { config: cfg, db_path: db_path.clone(), factory, gate_router: Arc::new(GateRouter::new(registry, 5)), ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)) });
     let td = make_td(dummy_task_card());
     let (tx, mut rx) = mpsc::channel(8);
     let result = ctx.spawn_task(&td, tx, Arc::new(SessionState::new())).await;
     assert!(result.is_none());
-    let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
-    assert!(matches!(msg, Message::TaskDone(_)), "expected TaskDone");
+    let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+    assert!(matches!(msg, Message::TaskDone(_)), "expected TaskDone, got {msg:?}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let status = read_task_status(&db_path, "pipe-test-task");
     assert_eq!(status, Some(TaskStatus::WaitingForVerification));
 }

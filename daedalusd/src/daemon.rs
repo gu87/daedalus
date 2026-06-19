@@ -429,7 +429,6 @@ impl DaemonContext {
                                         let rid = req_id.clone();
                                         let detail =
                                             format!("failed to insert switch agent_runs row: {e}");
-                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
                                         let _ = crate::ipc::reliable::send_reliable_event(
                                             &writer_tx2,
                                             &ledger,
