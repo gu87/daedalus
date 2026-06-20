@@ -1,6 +1,6 @@
 # P5+.4 实现完成报告：Task state restore
 
-> commits: `92186c1`, fixup: 待提交
+> commits: `92186c1`, fixup: `f17c549`
 
 ---
 

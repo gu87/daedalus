@@ -1862,3 +1862,14 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
 - one-shot reply（`used` 标志防重复发送）
 - 多 tab Map 管理（`useRef<Map<permission_id, reply>>`）
 - 终态清理 pending approval（onDone/onError → delete + approval: null）
+
+## P5+.4 Task state restore [DONE]
+
+> commits: 92186c1, fixup: f17c549
+
+**核心交付**：
+- `getTaskDetail(runId)` → HTTP GET /api/tasks/:run_id
+- 左侧 "历史任务" 区域（history-section CSS）
+- 点击 → 只读详情 Tab（readonly 隐藏 Composer）
+- heartbeat_at / pre-wrap 多行详情
+**验证**：`npm run build` ✅（223KB JS + 13.6KB CSS, 475ms）
