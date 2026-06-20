@@ -15,8 +15,11 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # or for openai_compat:
 export DEEPSEEK_API_KEY=sk-...
 
-# Launch daemon + desktop
+# Launch daemon + desktop (production mode, uses dist/)
 bash scripts/dogfood.sh
+
+# Frontend dev only (browser mock, no Electron)
+cd daedalus-desktop && npm run dev
 ```
 
 ## Phase 3–5 capabilities

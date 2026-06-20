@@ -65,11 +65,12 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
-# 4. Start Electron desktop in foreground (Ctrl+C kills Electron, trap kills daemon).
+# 4. Start Electron in production mode (loads dist/index.html, no Vite).
 echo "starting daedalus-desktop..."
 echo "=== Dogfood running ==="
 echo "HTTP: http://$HTTP_ADDR"
 echo "Press Ctrl+C to stop"
+NODE_ENV=production \
 DAEDALUSD_HTTP_ADDR="http://$HTTP_ADDR" \
 DAEDALUSD_SOCK="$SOCK_PATH" \
-  npm run electron:dev --prefix daedalus-desktop
+  npm run electron:start --prefix daedalus-desktop

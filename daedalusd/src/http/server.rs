@@ -9,7 +9,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::{Any, CorsLayer};
 
 use super::config;
 use super::health::{self, HttpState};
@@ -23,18 +22,12 @@ use super::validate;
 /// connections and drains existing ones.
 pub async fn run_http(listener: TcpListener, state: Arc<HttpState>, shutdown: CancellationToken) {
     // Build the router.
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
     let app = Router::new()
         .route("/api/health", get(health::health))
         .route("/api/tasks", get(tasks::list_tasks))
         .route("/api/tasks/:run_id", get(tasks::get_task))
         .route("/api/config/models", get(config::list_models))
         .route("/api/models/validate", post(validate::validate_model))
-        .layer(cors)
         .with_state(state);
 
     axum::serve(listener, app)
