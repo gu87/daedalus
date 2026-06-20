@@ -1,6 +1,23 @@
 # Daedalus — Agent OS
 
-Phase 5: Rust daemon (`daedalusd`) + Electron desktop (`daedalus-desktop`) + Python CLI (`daedalus`).
+Phase 5+: Rust daemon (`daedalusd`) + Electron desktop (`daedalus-desktop`) + Python CLI (`daedalus`).
+Desktop connects to daemon via HTTP API (health/tasks/history) + UDS NDJSON (task dispatch/permission).
+
+## Dogfood quickstart
+
+```bash
+# One-time setup
+npm install --prefix daedalus-desktop
+# Ensure ~/.daedalus/SOUL.md, ~/.daedalus/config/managed-agents.yaml (with daedalus-desktop agent),
+# and ~/.daedalus/models.yaml exist with valid api_key_env references.
+# Export API keys before running:
+export ANTHROPIC_API_KEY=sk-ant-...
+# or for openai_compat:
+export DEEPSEEK_API_KEY=sk-...
+
+# Launch daemon + desktop
+bash scripts/dogfood.sh
+```
 
 ## Phase 3–5 capabilities
 
@@ -101,8 +118,8 @@ cd daedalus-desktop && npm run build
 ```
  daedalusd (Rust)                           daedalus-desktop (Electron+React)
       │                                           │
-      │  NDJSON over UDS                HTTP API  │  (future IPC bridge)
-      │  /tmp/daedalusd.sock        127.0.0.1:9800│
+      │  NDJSON over UDS                HTTP API  │  health/tasks/history
+      │  /tmp/daedalusd.sock        127.0.0.1:9800│  UDS dispatch/permission
       └───────────────────────────────────────────┘
 
  ┌────────────────── daedalusd ──────────────────┐
@@ -150,11 +167,12 @@ cd daedalus-desktop && npm run build
  └────────────────────────────────────────────────┘
 ```
 
-## What Phase 5 does NOT include
+## What Phase 5+ does NOT include
 
-- Ω-Agent / MCP Bridge / cross-task DAG → Phase 5+
+- Ω-Agent / MCP Bridge / cross-task DAG
 - Pipeline execution engine
 - WebSocket / SSE real-time push
 - Task cancel / retry API
-- daedalus-desktop real IPC / backend integration
-- Credential hot-reload / Gemini / Cohere providers → Phase 5+
+- Credential hot-reload / Gemini / Cohere providers
+- Remote access / authentication / HTTPS
+- Browser dev mode uses mock data; Electron mode uses real daemon
