@@ -1,38 +1,52 @@
 # P5+.4 实现完成报告：Task state restore
 
-> commit: 待提交
+> commits: `92186c1`, fixup: 待提交
 
 ---
 
-## 1. 修改文件（6 个）
+## 1. 修改文件（8 个）
 
 | 文件 | 操作 |
 |------|:---:|
-| `daedalus-desktop/electron/preload.js` | + `getTaskDetail(runId)` → `fetch(/api/tasks/:run_id)` |
-| `daedalus-desktop/src/services/daedalusApi.ts` | + `TaskDetail` 类型 + `getTaskDetail()` + mock |
+| `daedalus-desktop/electron/preload.js` | + `getTaskDetail(runId)` |
+| `daedalus-desktop/src/services/daedalusApi.ts` | + `TaskDetail` 类型 + `getTaskDetail()` + mock（run-1/run-2 真实详情） |
 | `daedalus-desktop/src/types/index.ts` | `WorkTab` + `readonly?: boolean` |
-| `daedalus-desktop/src/App.tsx` | `historyTasks` state + `openHistoryTask()` + `historyTab()` helper |
-| `daedalus-desktop/src/components/AppShell.tsx` | 传递 `historyTasks` / `onOpenHistoryTask` 到 LeftSidebar |
-| `daedalus-desktop/src/components/LeftSidebar.tsx` | 底部新增 "历史任务" 区域 |
-| `daedalus-desktop/src/views/ChatView.tsx` | `readonly` tab 隐藏 Composer |
+| `daedalus-desktop/src/App.tsx` | `historyTasks` + `openHistoryTask` + `historyTab` helper |
+| `daedalus-desktop/src/components/AppShell.tsx` | 传递 props |
+| `daedalus-desktop/src/components/LeftSidebar.tsx` | 底部历史任务区域 + 过滤 readonly tab |
+| `daedalus-desktop/src/views/ChatView.tsx` | 详情消息 pre-wrap + readonly 隐藏 Composer |
+| `daedalus-desktop/src/styles.css` | history-section / task-detail-text 最小样式 |
 
-**不改**：daedalusd、IPC 协议、SQLite schema、UI 布局
-
----
-
-## 2. 验证
-
-```
-npm run build  ✅ (222KB JS, 512ms)
-```
-
-- 启动 Desktop → 左侧显示历史任务列表（mock 2 条）
-- 点击历史任务 → 打开只读 Tab（无 Composer）
-- daemon 离线/空列表 → 显示 "暂无历史任务"
+**不改**：daedalusd、IPC、SQLite、UI 布局
 
 ---
 
-## 3. 不做
+## 2. 返修记录
+
+| # | 修复 |
+|---|------|
+| 1 | history-section CSS（复用侧栏视觉规则） |
+| 2 | mock getTaskDetail 对 run-1/run-2 返回真实详情 |
+| 3 | conversations 列表过滤 `!tab.readonly` |
+| 4 | 详情显示 heartbeat_at + pre-wrap 换行保留 |
+
+---
+
+## 3. 验证
+
+```
+npm run build  ✅ (223KB JS + 13.6KB CSS, 475ms)
+```
+
+- 历史任务列表正常显示
+- 点击 → 只读详情（含 heartbeat_at，多行保留）
+- 无 Composer
+- 历史 Tab 不出现在对话列表
+- 未知 runId → 加载失败
+
+---
+
+## 4. 不做
 
 | 约束 | 状态 |
 |------|:---:|

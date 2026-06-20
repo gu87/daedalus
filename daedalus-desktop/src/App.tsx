@@ -87,6 +87,7 @@ function App() {
           detail.error_taxonomy ? `Error: ${detail.error_taxonomy}` : "",
           `Spawned: ${new Date(detail.spawned_at * 1000).toLocaleString()}`,
           detail.completed_at ? `Completed: ${new Date(detail.completed_at * 1000).toLocaleString()}` : "",
+          detail.heartbeat_at ? `Heartbeat: ${new Date(detail.heartbeat_at * 1000).toLocaleString()}` : "",
           detail.parent_run_id ? `Parent: ${detail.parent_run_id}` : "",
           `Depth: ${detail.spawn_depth}`,
         ].filter(Boolean).join("\n");

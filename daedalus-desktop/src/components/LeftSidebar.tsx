@@ -27,7 +27,7 @@ const primaryActions: Array<{ kind: StarterKind; icon: string; label: string }> 
 ];
 
 export function LeftSidebar(props: Props) {
-  const conversations = props.tabs.filter((tab) => ["meeting", "task", "chat"].includes(tab.kind));
+  const conversations = props.tabs.filter((tab) => !tab.readonly && ["meeting", "task", "chat"].includes(tab.kind));
 
   return (
     <aside className="left-sidebar">

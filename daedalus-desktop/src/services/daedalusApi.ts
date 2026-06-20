@@ -85,7 +85,9 @@ const mock: DaedalusApi = {
   async ping() {
     return false;
   },
-  async getTaskDetail(_runId) {
+  async getTaskDetail(runId) {
+    if (runId === "run-1") return { run_id: "run-1", agent_id: "test", task_id: "task-demo-1", status: "done", spawned_at: Date.now()/1000 - 3600, completed_at: Date.now()/1000 - 300, heartbeat_at: Date.now()/1000 - 1800, spawn_depth: 0 };
+    if (runId === "run-2") return { run_id: "run-2", agent_id: "test", task_id: "task-demo-2", status: "error", spawned_at: Date.now()/1000 - 7200, completed_at: Date.now()/1000 - 7000, heartbeat_at: Date.now()/1000 - 7100, error_taxonomy: "tool_failure", spawn_depth: 0 };
     return null;
   },
   async dispatchTask(_goal, callbacks) {

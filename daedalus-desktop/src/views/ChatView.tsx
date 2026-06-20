@@ -35,7 +35,7 @@ export function ChatView(props: Props) {
                 <span className="message-time">{message.time}</span>
                 <span className="message-tag">{message.tag}</span>
               </div>
-              <div className="message-body">{message.body}</div>
+              <div className={`message-body${message.tag === "详情" ? " task-detail-text" : ""}`}>{message.body}</div>
               {message.decision ? (
                 <div className="decision-box">
                   <strong>决策摘要：</strong>{message.decision}
