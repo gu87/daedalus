@@ -15,7 +15,7 @@ function createWindow() {
     minHeight: 600,
     title: "Daedalus Desktop",
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
     },
