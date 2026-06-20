@@ -10,12 +10,12 @@ cd "$PROJECT_DIR"
 
 TMP_DIR=$(mktemp -d /tmp/daedalus-dogfood-XXXXXX)
 SOCK_PATH="$TMP_DIR/daedalusd.sock"
-STATE_DIR="$TMP_DIR/state"
+STATE_DIR="${DAEDALUSD_STATE_DIR:-$HOME/.daedalus/state}"
 HTTP_ADDR="127.0.0.1:9800"
 
-# Check port not in use.
-if lsof -i :9800 > /dev/null 2>&1; then
-  echo "ERROR: port 9800 is already in use" >&2
+# Check port not in use (LISTEN only).
+if lsof -nP -iTCP:9800 -sTCP:LISTEN > /dev/null 2>&1; then
+  echo "ERROR: port 9800 is already in use (LISTEN)" >&2
   rm -rf "$TMP_DIR"
   exit 1
 fi

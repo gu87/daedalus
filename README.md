@@ -33,7 +33,7 @@ bash scripts/dogfood.sh
 - **DAEDALUS.md** — project-level agent instructions injected into system prompt (`[soul] → [daedalus] → [memory]`)
 - **Durable Execution** — `system.ack` / event ledger (`events` table) / `session.rejoin` replay
 - **Pipeline** — `TaskStatus` 9-state lifecycle + `tasks` table + daemon event wiring (12 update points)
-- **daedalus-desktop** — Electron + React UI skeleton (mock data, no real IPC yet)
+- **daedalus-desktop** — Electron + React UI (HTTP API + UDS, real daemon connectivity)
 
 ### Phase 4 — HTTP API & Observability
 - **`GET /api/health`** — daemon status, uptime, DB connectivity
@@ -41,7 +41,7 @@ bash scripts/dogfood.sh
 - **`GET /api/tasks/:run_id`** — single task detail
 - **`GET /api/config/models`** — model summary (id/provider/type only, no secrets)
 - **`POST /api/models/validate`** — single-model connectivity probe (Router production path, 10s timeout)
-- **daedalus-desktop** — Electron + React + TypeScript UI skeleton (mock data, zero backend)
+- **daedalus-desktop** — Electron + React UI (in P4 as UI skeleton; now connected in P5+)
 
 ## Quick start
 
