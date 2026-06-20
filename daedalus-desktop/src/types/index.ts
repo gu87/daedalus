@@ -46,6 +46,7 @@ export type WorkTab = {
   goal: string;
   messages: TimelineEvent[];
   approval?: ApprovalRequest | null;
+  readonly?: boolean;
 };
 
 export type RightToolKind =

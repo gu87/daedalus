@@ -1,54 +1,41 @@
-# P5+.3 实现完成报告：Gate / Permission 审批可用化
+# P5+.4 实现完成报告：Task state restore
 
-> commits: `d6e01ed`, fixup: `35ef66d`
+> commit: 待提交
 
 ---
 
-## 1. 修改文件
+## 1. 修改文件（6 个）
 
 | 文件 | 操作 |
 |------|:---:|
-| `daedalus-desktop/electron/preload.js` | `permission.request` handler 创建 one-shot `reply` 对象（`used` 标志，`approve/reject/requestChanges`）；**不 settle**，连接保持打开 |
-| `daedalus-desktop/src/services/daedalusApi.ts` | `PermissionReply` 接口 + `onPermissionRequest(perm, reply)` 签名更新 |
-| `daedalus-desktop/src/App.tsx` | `useRef<Map>` 管理多 tab 审批；`decideApproval` 通过 `approval.id` 查 reply 并发送 response |
+| `daedalus-desktop/electron/preload.js` | + `getTaskDetail(runId)` → `fetch(/api/tasks/:run_id)` |
+| `daedalus-desktop/src/services/daedalusApi.ts` | + `TaskDetail` 类型 + `getTaskDetail()` + mock |
+| `daedalus-desktop/src/types/index.ts` | `WorkTab` + `readonly?: boolean` |
+| `daedalus-desktop/src/App.tsx` | `historyTasks` state + `openHistoryTask()` + `historyTab()` helper |
+| `daedalus-desktop/src/components/AppShell.tsx` | 传递 `historyTasks` / `onOpenHistoryTask` 到 LeftSidebar |
+| `daedalus-desktop/src/components/LeftSidebar.tsx` | 底部新增 "历史任务" 区域 |
+| `daedalus-desktop/src/views/ChatView.tsx` | `readonly` tab 隐藏 Composer |
 
-**不改**：daedalusd、IPC 协议、Gate/Agent Loop、UI 布局
-
----
-
-## 2. 设计要点
-
-| 约束 | 实现 |
-|------|------|
-| permission.request 不 settle | ✅ — 审批期间连接断开仍触发 `connection_lost` |
-| Map 管理多 tab | ✅ — `useRef<Map<string, PermissionReply>>`，key = `permission_id` |
-| one-shot reply | ✅ — `used` 标志，重复点击不发送 |
-| requestChanges | ✅ — 映射为 `decision: "denied"`，UI 文案 "本轮按拒绝处理" |
-| 发送后不关闭连接 | ✅ — 继续等待 task.done/task.error |
+**不改**：daedalusd、IPC 协议、SQLite schema、UI 布局
 
 ---
 
-## 3. 返修记录
-
-| # | 修复 |
-|---|------|
-| 1 | onDone/onError 回调中清理 `permissionReplies` Map + 设置 `approval: null`（终态后不残留可点击的审批条） |
-| 2 | browser mock 改为纯 permission 流（不混发 onError + permission.request） |
-
----
-
-## 4. 验证
+## 2. 验证
 
 ```
-npm run build  ✅ (219KB JS, 498ms)
+npm run build  ✅ (222KB JS, 512ms)
 ```
+
+- 启动 Desktop → 左侧显示历史任务列表（mock 2 条）
+- 点击历史任务 → 打开只读 Tab（无 Composer）
+- daemon 离线/空列表 → 显示 "暂无历史任务"
 
 ---
 
-## 4. 不做
+## 3. 不做
 
 | 约束 | 状态 |
 |------|:---:|
-| 修改 daedalusd / IPC / Gate | ✅ |
-| session.rejoin / ack / reconnect | ✅ |
-| 重设计 UI | ✅ |
+| session.rejoin / ack / event replay | ✅ |
+| 修改 daemon / IPC / SQLite | ✅ |
+| 新 UI 设计 | ✅ |

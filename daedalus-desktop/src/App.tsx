@@ -1,9 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { initialTabs, workspaces as initialWorkspaces } from "./data/mockData";
-import { getApi } from "./services/daedalusApi";
-import type { ApprovalRequest, RightToolKind, TimelineEvent, ViewKind, WorkTab, Workspace } from "./types";
+import { getApi, type TaskSummary } from "./services/daedalusApi";
+import type { ApprovalRequest, RightToolKind, StatusType, TimelineEvent, ViewKind, WorkTab, Workspace } from "./types";
 import { createId, nowLabel } from "./utils/time";
+
+function historyTab(t: TaskSummary): WorkTab {
+  const st = ({ queued: "排队中", running: "运行中", done: "完成", error: "错误", cancelled: "已取消", orphaned: "已孤立" } as Record<string,string>)[t.status] || t.status;
+  const stt = ({ queued: "waiting", running: "running", done: "done", error: "rejected", cancelled: "rejected", orphaned: "rejected" } as Record<string,string>)[t.status] as StatusType || "normal" as StatusType;
+  return {
+    id: `history-${t.run_id}`, kind: "task", type: "历史", readonly: true,
+    title: t.task_id.slice(0, 24), status: st, statusType: stt,
+    workspace: "Daedalus",
+    meta: [`任务：${t.task_id}`, t.error_taxonomy ? `错误：${t.error_taxonomy}` : ""].filter(Boolean),
+    goal: "", messages: [], approval: null,
+  };
+}
 
 const starterMap: Record<string, { kind: ViewKind; title: string; type: string }> = {
   chat: { kind: "new-chat", title: "新对话", type: "对话" },
@@ -34,6 +46,58 @@ function App() {
 
   // P5+.3: pending permission replies, keyed by permission_id.
   const permissionReplies = useRef<Map<string, { approve(): void; reject(): void; requestChanges(): void }>>(new Map());
+
+  // P5+.4: history tasks from daemon.
+  const [historyTasks, setHistoryTasks] = useState<WorkTab[]>([]);
+  useEffect(() => {
+    getApi().listSessions().then((sessions: TaskSummary[]) => {
+      setHistoryTasks(sessions.map((t) => historyTab(t)));
+    }).catch(() => {});
+  }, []);
+
+  function openHistoryTask(runId: string) {
+    const existing = tabs.find((t) => t.id === `history-${runId}`);
+    if (existing) { ensureOpen(existing.id); setActiveTabId(existing.id); return; }
+    // Open detail tab immediately, then load detail async.
+    const tab: WorkTab = {
+      id: `history-${runId}`, kind: "task", type: "历史", readonly: true,
+      title: runId.slice(0, 24), status: "加载中", statusType: "waiting",
+      workspace: "Daedalus", meta: [], goal: "",
+      messages: [], approval: null,
+    };
+    setTabs((items) => [...items, tab]);
+    setOpenTabIds((ids) => [...ids, tab.id]);
+    setActiveTabId(tab.id);
+    getApi().getTaskDetail(runId).then((detail) => {
+      if (!detail) {
+        setTabs((items) => items.map((t) =>
+          t.id !== tab.id ? t : { ...t, status: "加载失败", statusType: "rejected", messages: [{ id: createId("event"), agent: "系统", tag: "错误", time: nowLabel(), body: "无法加载任务详情" }] }
+        ));
+        return;
+      }
+      setTabs((items) => items.map((t) => {
+        if (t.id !== tab.id) return t;
+        const statusLabel = ({ queued: "排队中", running: "运行中", done: "完成", error: "错误", cancelled: "已取消", orphaned: "已孤立" } as Record<string,string>)[detail.status] || detail.status;
+        const statusType = ({ queued: "waiting", running: "running", done: "done", error: "rejected", cancelled: "rejected", orphaned: "rejected" } as Record<string,string>)[detail.status] as StatusType || "normal" as StatusType;
+        const lines = [
+          `Run ID: ${detail.run_id}`,
+          `Agent: ${detail.agent_id}`,
+          `Task: ${detail.task_id}`,
+          `Status: ${detail.status}`,
+          detail.error_taxonomy ? `Error: ${detail.error_taxonomy}` : "",
+          `Spawned: ${new Date(detail.spawned_at * 1000).toLocaleString()}`,
+          detail.completed_at ? `Completed: ${new Date(detail.completed_at * 1000).toLocaleString()}` : "",
+          detail.parent_run_id ? `Parent: ${detail.parent_run_id}` : "",
+          `Depth: ${detail.spawn_depth}`,
+        ].filter(Boolean).join("\n");
+        return { ...t, status: statusLabel, statusType, messages: [{ id: createId("event"), agent: "系统", tag: "详情", time: nowLabel(), body: lines }] };
+      }));
+    }).catch(() => {
+      setTabs((items) => items.map((t) =>
+        t.id !== tab.id ? t : { ...t, status: "加载失败", statusType: "rejected" }
+      ));
+    });
+  }
 
   useEffect(() => {
     const api = getApi();
@@ -355,6 +419,8 @@ function App() {
       onActivateRightTool={setActiveRightTool}
       onCloseRightTool={closeRightTool}
       daemonOnline={daemonOnline}
+      historyTasks={historyTasks}
+      onOpenHistoryTask={openHistoryTask}
     />
   );
 }

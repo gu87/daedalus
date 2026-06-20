@@ -22,6 +22,20 @@ export interface TaskSummary {
   error_taxonomy?: string;
 }
 
+/** P5+.4: single task detail from GET /api/tasks/:run_id. */
+export interface TaskDetail {
+  run_id: string;
+  agent_id: string;
+  task_id: string;
+  status: string;
+  spawned_at: number;
+  completed_at?: number;
+  heartbeat_at?: number;
+  error_taxonomy?: string;
+  parent_run_id?: string;
+  spawn_depth: number;
+}
+
 /** P5+.3: one-shot reply for permission requests. */
 export interface PermissionReply {
   approve(): void;
@@ -41,6 +55,7 @@ export interface DaedalusApi {
   getHealth(): Promise<HealthStatus>;
   listSessions(): Promise<TaskSummary[]>;
   ping(): Promise<boolean>;
+  getTaskDetail(runId: string): Promise<TaskDetail | null>;
   dispatchTask(
     goal: string,
     callbacks: TaskCallbacks,
@@ -62,10 +77,16 @@ const mock: DaedalusApi = {
     return { status: "mock", db_ok: false };
   },
   async listSessions() {
-    return [];
+    return [
+      { run_id: "run-1", agent_id: "test", task_id: "task-demo-1", status: "done", spawned_at: Date.now()/1000 - 3600 },
+      { run_id: "run-2", agent_id: "test", task_id: "task-demo-2", status: "error", spawned_at: Date.now()/1000 - 7200, error_taxonomy: "tool_failure" },
+    ];
   },
   async ping() {
     return false;
+  },
+  async getTaskDetail(_runId) {
+    return null;
   },
   async dispatchTask(_goal, callbacks) {
     // Mock permission flow: after 500ms, fire permission.request.

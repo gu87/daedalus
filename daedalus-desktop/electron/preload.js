@@ -146,6 +146,17 @@ contextBridge.exposeInMainWorld("daedalusAPI", {
     }
   },
 
+  // P5+.4: fetch single task detail.
+  getTaskDetail: async (runId) => {
+    try {
+      const resp = await fetch(`${DAEMON_HTTP_ADDR}/api/tasks/${encodeURIComponent(runId)}`);
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch {
+      return null;
+    }
+  },
+
   // ── Ping (P5+.2) ──────────────────────────────────────────────────────
   ping: () => {
     return new Promise((resolve) => {

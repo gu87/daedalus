@@ -13,6 +13,8 @@ type Props = {
   onAddWorkspace: () => void;
   onActivateTab: (tabId: string) => void;
   onCollapse: () => void;
+  historyTasks: WorkTab[];
+  onOpenHistoryTask: (runId: string) => void;
 };
 
 const primaryActions: Array<{ kind: StarterKind; icon: string; label: string }> = [
@@ -94,6 +96,28 @@ export function LeftSidebar(props: Props) {
                 <small>{tab.status} · {tab.type}</small>
               </span>
               <span className="item-badge">{tab.type}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="history-section">
+        <div className="section-label">历史任务</div>
+        <div className="tab-list">
+          {props.historyTasks.length === 0 && (
+            <div className="history-empty">暂无历史任务</div>
+          )}
+          {props.historyTasks.map((tab) => (
+            <button
+              key={tab.id}
+              className={`tab-item ${tab.id === props.activeTabId ? "active" : ""}`}
+              onClick={() => {
+                const runId = tab.id.startsWith("history-") ? tab.id.slice(8) : tab.id;
+                props.onOpenHistoryTask(runId);
+              }}
+            >
+              <span className="item-label">{tab.title}</span>
+              <span className={`item-badge ${tab.statusType}`}>{tab.status}</span>
             </button>
           ))}
         </div>

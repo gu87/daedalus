@@ -66,11 +66,13 @@ export function ChatView(props: Props) {
         />
       ) : null}
 
-      <Composer
-        placeholder={`给 ${props.tab.kind === "meeting" ? "会议" : props.tab.kind === "task" ? "任务" : props.tab.title} 发送消息...`}
-        onAttach={() => setAttached(true)}
-        onSend={(value) => props.onSendMessage(props.tab.id, value)}
-      />
+      {!props.tab.readonly && (
+        <Composer
+          placeholder={`给 ${props.tab.kind === "meeting" ? "会议" : props.tab.kind === "task" ? "任务" : props.tab.title} 发送消息...`}
+          onAttach={() => setAttached(true)}
+          onSend={(value) => props.onSendMessage(props.tab.id, value)}
+        />
+      )}
     </div>
   );
 }

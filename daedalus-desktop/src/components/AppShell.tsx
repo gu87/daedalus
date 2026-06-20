@@ -32,6 +32,8 @@ type Props = {
   onActivateRightTool: (tool: RightToolKind | null) => void;
   onCloseRightTool: (tool: RightToolKind) => void;
   daemonOnline: boolean;
+  historyTasks: WorkTab[];
+  onOpenHistoryTask: (runId: string) => void;
 };
 
 export function AppShell(props: Props) {
@@ -61,6 +63,8 @@ export function AppShell(props: Props) {
         onAddWorkspace={props.onAddWorkspace}
         onActivateTab={props.onActivateTab}
         onCollapse={() => props.onSetLeftCollapsed(true)}
+        historyTasks={props.historyTasks}
+        onOpenHistoryTask={props.onOpenHistoryTask}
       />
 
       <LeftRail
