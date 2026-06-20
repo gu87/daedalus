@@ -16,6 +16,8 @@ function createWindow() {
     title: "Daedalus Desktop",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
+      // preload needs Node `net` for UDS IPC → sandbox disabled.
+      sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
     },
