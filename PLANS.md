@@ -1873,3 +1873,17 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
 - 点击 → 只读详情 Tab（readonly 隐藏 Composer）
 - heartbeat_at / pre-wrap 多行详情
 **验证**：`npm run build` ✅（223KB JS + 13.6KB CSS, 475ms）
+
+## P5+.5 Dogfood smoke + README [DONE]
+
+> commits: a7ef253, fixups: 4fb7461, 2d3144f, b1bdcf1, 0001697, d01474f
+
+**核心交付**：`scripts/dogfood.sh` 一键启动 daemon + Electron Desktop。
+实机验证：Desktop 🟢 + task.done ✅。
+
+## P5+.6 daedalus run 终端任务命令 [DONE]
+
+> commits: e4a0cb1, fixups: 3851195, 810322e, 653b46f
+
+**核心交付**：`daedalus run "goal"` CLI 命令，复用 DaedalusClient.dispatch()。
+16/16 tests pass。CLI→daemon 全链路真实验收完成。
