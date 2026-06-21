@@ -100,6 +100,14 @@ pub enum PermissionDecision {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Tool result messages carry the matching tool_call id.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Assistant messages carry the tool_calls from the LLM response.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

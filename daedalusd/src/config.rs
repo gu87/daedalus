@@ -23,6 +23,18 @@ pub struct ModelStrategy {
     pub fallback_chain: Vec<ModelConfig>,
 }
 
+// ── ThinkingMode ─────────────────────────────────────────────────────
+
+/// Per-model thinking mode override.
+///
+/// Only `Disabled` is supported in Phase 5+.  `None` means the provider
+/// default (thinking enabled for DeepSeek, no-op for Anthropic).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    Disabled,
+}
+
 // ── models.yaml deserialisation ───────────────────────────────────────
 
 /// Top-level structure of `~/.daedalus/models.yaml`.
@@ -56,6 +68,10 @@ pub struct ModelEntry {
     pub base_url: Option<String>,
     /// Per-model override for the API-key environment variable.
     pub api_key_env: Option<String>,
+    /// Per-model thinking mode.  Only honoured by OpenAICompatProvider.
+    /// `None` → no `thinking` field is sent in the request body.
+    #[serde(default)]
+    pub thinking: Option<ThinkingMode>,
 }
 
 // ── YAML loading ──────────────────────────────────────────────────────

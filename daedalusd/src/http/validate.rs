@@ -103,6 +103,8 @@ pub(crate) async fn validate_model(
     let messages = vec![ChatMessage {
         role: "user".into(),
         content: "ping".into(),
+        tool_call_id: None,
+        tool_calls: vec![],
     }];
     let tools = vec![];
 

@@ -1887,3 +1887,14 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
 
 **核心交付**：`daedalus run "goal"` CLI 命令，复用 DaedalusClient.dispatch()。
 16/16 tests pass。CLI→daemon 全链路真实验收完成。
+
+## P5+.7 完整 OpenAI 工具消息协议 + thinking 模型级配置 [DONE]
+
+> commits: TBD (当前 working tree)
+
+**核心交付**：
+1. 完整 OpenAI 工具消息协议 — `ChatMessage.tool_calls` + `tool_call_id`
+2. Thinking 模型级配置 — `models.yaml` 的 `thinking: disabled`
+3. 修复 AgentLoop denied 路径跳过 pending_tool_calls 的 bug
+
+**E2E 验证**：`daedalus run "confirm task done with message: hello world"` → exit 0 + task.done ✅

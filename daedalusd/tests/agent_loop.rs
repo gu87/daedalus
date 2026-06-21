@@ -1146,3 +1146,101 @@ async fn scenario_15_must_keep_from_task_card() {
         err.detail
     );
 }
+
+// ── P5+.7 regression tests ──────────────────────────────────────────────
+
+/// Permission broker that returns a different decision on each call.
+struct SequentialPermissionBroker {
+    decisions: std::sync::Mutex<Vec<PermissionDecision>>,
+}
+
+#[async_trait]
+impl PermissionBroker for SequentialPermissionBroker {
+    async fn request_permission(
+        &self,
+        _agent_id: &str,
+        _req_id: &str,
+        _tool_call: &ToolCall,
+        _task_id: &str,
+    ) -> Result<PermissionDecision, daedalusd::error::AgentError> {
+        let mut guard = self.decisions.lock().unwrap();
+        let decision = if guard.is_empty() {
+            PermissionDecision::Denied
+        } else {
+            guard.remove(0)
+        };
+        Ok(decision)
+    }
+}
+
+/// 21. P5+.7: two tool calls in one batch — first denied, second still processed.
+///
+/// Before P5+.7, the denied path jumped directly to SendingToLLM,
+/// skipping remaining pending_tool_calls.  This would cause an OpenAI
+/// protocol violation (assistant.tool_calls count > tool messages count).
+#[tokio::test]
+async fn scenario_21_denied_does_not_truncate_pending_tool_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config_files(&dir);
+
+    // First LLM call returns two tool calls both needing permission.
+    let chunks = make_tool_call_chunks(vec![
+        ("c1", "needs_perm", json!({"action": "first"})),
+        ("c2", "needs_perm", json!({"action": "second"})),
+    ]);
+    let provider = Arc::new(FakeProvider::new(chunks));
+
+    // Tool that always needs permission (R3).
+    let tool: Arc<dyn Tool> = Arc::new(FakeTool {
+        name: "needs_perm",
+        risk: RiskLevel::R3,
+        agents: vec!["*".into()],
+        perm: true,
+        output: "done".into(),
+        is_error: false,
+        call_count: std::sync::atomic::AtomicUsize::new(0),
+    });
+
+    // First call denied, second approved.
+    let broker = Arc::new(SequentialPermissionBroker {
+        decisions: std::sync::Mutex::new(vec![
+            PermissionDecision::Denied,
+            PermissionDecision::Approved,
+        ]),
+    });
+
+    let mut ag = build_loop(&dir, provider, vec![tool], broker);
+    let result = ag.run(dummy_task_card(), Duration::from_secs(5)).await;
+
+    // Should succeed — second tool was approved and executed.
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+    // Verify both tool messages are present in the conversation.
+    let tool_msgs: Vec<_> = ag
+        .messages()
+        .iter()
+        .filter(|m| m.role == "tool")
+        .collect();
+    assert_eq!(
+        tool_msgs.len(),
+        2,
+        "expected 2 tool messages (one per tool call), got {}",
+        tool_msgs.len()
+    );
+    assert_eq!(
+        tool_msgs[0].tool_call_id.as_deref(),
+        Some("c1"),
+        "first tool message should match first tool call"
+    );
+    assert_eq!(
+        tool_msgs[1].tool_call_id.as_deref(),
+        Some("c2"),
+        "second tool message should match second tool call"
+    );
+    // First was denied.
+    assert!(
+        tool_msgs[0].content.contains("denied"),
+        "first tool should be denied: {}",
+        tool_msgs[0].content
+    );
+}

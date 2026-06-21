@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use super::sse::SseDecoder;
 use super::{stream_channel, ApiKey, LLMProvider, StreamHandle};
+use crate::config::ThinkingMode;
 use crate::error::ProviderError;
 use crate::types::{ChatMessage, ChatResponse, ModelConfig, StreamChunk, ToolCall, ToolDef};
 
@@ -16,6 +17,7 @@ pub struct OpenAICompatProvider {
     client: Client,
     api_key: ApiKey,
     base_url: String,
+    thinking: Option<ThinkingMode>,
 }
 
 impl OpenAICompatProvider {
@@ -27,7 +29,67 @@ impl OpenAICompatProvider {
                 .expect("reqwest Client::build"),
             api_key,
             base_url,
+            thinking: None,
         }
+    }
+
+    /// Enable per-model thinking mode override.
+    pub fn with_thinking(mut self, mode: ThinkingMode) -> Self {
+        self.thinking = Some(mode);
+        self
+    }
+
+    // ── request construction ──────────────────────────────────────────
+
+    fn build_request(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        config: &ModelConfig,
+        stream: bool,
+    ) -> Value {
+        let msgs: Vec<Value> = messages
+            .iter()
+            .map(|m| {
+                let mut msg = json!({"role": m.role, "content": m.content});
+                // P5+.7: tool message carries tool_call_id.
+                if let Some(ref tcid) = m.tool_call_id {
+                    msg["tool_call_id"] = json!(tcid);
+                }
+                // P5+.7: assistant message carries tool_calls.
+                if !m.tool_calls.is_empty() {
+                    msg["tool_calls"] = json!(m
+                        .tool_calls
+                        .iter()
+                        .map(|tc| json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.input.to_string(),
+                            }
+                        }))
+                        .collect::<Vec<Value>>());
+                }
+                msg
+            })
+            .collect();
+        let mut body = json!({
+            "model": config.model, "max_tokens": config.max_tokens,
+            "temperature": config.temperature, "stream": stream, "messages": msgs,
+        });
+        if !tools.is_empty() {
+            let tl: Vec<Value> = tools
+                .iter()
+                .map(|t| json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.input_schema}}))
+                .collect();
+            body["tools"] = json!(tl);
+        }
+        // P5+.7: per-model thinking mode override.
+        if let Some(ThinkingMode::Disabled) = self.thinking {
+            body["thinking"] = json!({"type": "disabled"});
+        }
+        body
     }
 }
 
@@ -39,7 +101,7 @@ impl LLMProvider for OpenAICompatProvider {
         tools: &[ToolDef],
         config: &ModelConfig,
     ) -> Result<ChatResponse, ProviderError> {
-        let body = build_request(messages, tools, config, false);
+        let body = self.build_request(messages, tools, config, false);
         let url = format!("{}/chat/completions", self.base_url);
         let resp = send(&self.client, &url, &self.api_key, &body).await?;
         let json: Value = resp
@@ -55,7 +117,7 @@ impl LLMProvider for OpenAICompatProvider {
         tools: &[ToolDef],
         config: &ModelConfig,
     ) -> Result<StreamHandle, ProviderError> {
-        let body = build_request(messages, tools, config, true);
+        let body = self.build_request(messages, tools, config, true);
         let url = format!("{}/chat/completions", self.base_url);
         let resp = send(&self.client, &url, &self.api_key, &body).await?;
         let (tx, handle) = stream_channel();
@@ -97,32 +159,6 @@ async fn send(
         return Err(crate::llm::anthropic::classify_http_error(status, body));
     }
     Ok(resp)
-}
-
-// ── request building ──────────────────────────────────────────────────
-
-fn build_request(
-    messages: &[ChatMessage],
-    tools: &[ToolDef],
-    config: &ModelConfig,
-    stream: bool,
-) -> Value {
-    let msgs: Vec<Value> = messages
-        .iter()
-        .map(|m| json!({"role": m.role, "content": m.content}))
-        .collect();
-    let mut body = json!({
-        "model": config.model, "max_tokens": config.max_tokens,
-        "temperature": config.temperature, "stream": stream, "messages": msgs,
-    });
-    if !tools.is_empty() {
-        let tl: Vec<Value> = tools
-            .iter()
-            .map(|t| json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.input_schema}}))
-            .collect();
-        body["tools"] = json!(tl);
-    }
-    body
 }
 
 // ── non-streaming ─────────────────────────────────────────────────────
@@ -378,5 +414,103 @@ mod tests {
         let json = json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"x","arguments":"{}"}}]}}]});
         let err = parse_chat_response(&json).unwrap_err();
         assert!(matches!(err, ProviderError::Parse(_)));
+    }
+
+    // ── P5+.7: build_request method tests ─────────────────────────────
+
+    fn make_provider(thinking: Option<ThinkingMode>) -> OpenAICompatProvider {
+        let api_key = ApiKey::new("sk-test");
+        let mut p = OpenAICompatProvider::new(api_key, "https://test.example.com/v1".into());
+        if let Some(mode) = thinking {
+            p = p.with_thinking(mode);
+        }
+        p
+    }
+
+    #[test]
+    fn thinking_omitted_by_default() {
+        let p = make_provider(None);
+        let body = p.build_request(
+            &[],
+            &[],
+            &ModelConfig {
+                model: "m".into(),
+                max_tokens: 1,
+                temperature: 0.0,
+            },
+            false,
+        );
+        // Default: no thinking field.
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn thinking_disabled_sent() {
+        let p = make_provider(Some(ThinkingMode::Disabled));
+        let body = p.build_request(
+            &[],
+            &[],
+            &ModelConfig {
+                model: "m".into(),
+                max_tokens: 1,
+                temperature: 0.0,
+            },
+            false,
+        );
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    }
+
+    #[test]
+    fn tool_calls_serialized_as_openai_function_format() {
+        let p = make_provider(None);
+        let tc = ToolCall {
+            id: "call_1".into(),
+            name: "file_read".into(),
+            input: json!({"path": "/etc/hosts"}),
+        };
+        let msg = ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![tc],
+        };
+        let body = p.build_request(
+            &[msg],
+            &[],
+            &ModelConfig {
+                model: "m".into(),
+                max_tokens: 1,
+                temperature: 0.0,
+            },
+            false,
+        );
+        let tc0 = &body["messages"][0]["tool_calls"][0];
+        assert_eq!(tc0["id"], "call_1");
+        assert_eq!(tc0["type"], "function");
+        assert_eq!(tc0["function"]["name"], "file_read");
+        // arguments must be a JSON string, not an object.
+        assert_eq!(tc0["function"]["arguments"], "{\"path\":\"/etc/hosts\"}");
+    }
+
+    #[test]
+    fn tool_call_id_in_tool_message() {
+        let p = make_provider(None);
+        let msg = ChatMessage {
+            role: "tool".into(),
+            content: "file contents".into(),
+            tool_call_id: Some("call_abc".into()),
+            tool_calls: vec![],
+        };
+        let body = p.build_request(
+            &[msg],
+            &[],
+            &ModelConfig {
+                model: "m".into(),
+                max_tokens: 1,
+                temperature: 0.0,
+            },
+            false,
+        );
+        assert_eq!(body["messages"][0]["tool_call_id"], "call_abc");
     }
 }

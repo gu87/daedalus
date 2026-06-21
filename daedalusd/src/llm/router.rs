@@ -111,7 +111,11 @@ impl Router {
                             entry.id
                         ))
                     })?;
-                    Arc::new(OpenAICompatProvider::new(api_key, base_url.to_string()))
+                    let mut provider = OpenAICompatProvider::new(api_key, base_url.to_string());
+                    if let Some(ref mode) = entry.thinking {
+                        provider = provider.with_thinking(mode.clone());
+                    }
+                    Arc::new(provider)
                 }
                 other => {
                     return Err(DaedalusError::UnknownProvider {

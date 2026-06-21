@@ -23,6 +23,8 @@ fn text_msg(content: &str) -> ChatMessage {
     ChatMessage {
         role: "user".into(),
         content: content.into(),
+        tool_call_id: None,
+        tool_calls: vec![],
     }
 }
 
@@ -667,6 +669,106 @@ models:
         // "deepseek-v4-pro", the Expectation above would fail on drop
         // (unmatched).  The fact that we got here proves the model_id
         // was correctly resolved.
+    }
+
+    /// P5+.7: `thinking: disabled` in models.yaml sends `{"thinking":{"type":"disabled"}}`
+    /// in the HTTP request body, and the local model id still maps correctly to
+    /// the upstream `model_id`.
+    #[tokio::test]
+    async fn from_config_thinking_disabled_sent_in_http_request() {
+        use httptest::matchers::{json_decoded, request};
+        use httptest::{Expectation, Server};
+        use serde_json::json;
+
+        let srv = Server::run();
+        let url = srv.url_str("/v1");
+
+        // Assert both: upstream model_id AND thinking field in body.
+        srv.expect(
+            Expectation::matching(request::body(json_decoded(|v: &serde_json::Value| {
+                let model_ok = v.get("model").and_then(|m| m.as_str()) == Some("upstream-x");
+                let thinking_ok = v
+                    .get("thinking")
+                    .and_then(|t| t.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("disabled");
+                model_ok && thinking_ok
+            })))
+            .respond_with(httptest::responders::json_encoded(json!({
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+            }))),
+        );
+
+        let yaml = format!(
+            r#"providers:
+  openai_compat:
+    type: openai_compat
+    api_key_env: HOME
+
+models:
+  - id: local-model
+    provider: openai_compat
+    base_url: {url}
+    model_id: upstream-x
+    thinking: disabled
+"#
+        );
+        let cfg = parse_config(&yaml);
+        let router = Router::from_models_config(&cfg, &strategy("local-model")).unwrap();
+
+        let resp = router
+            .chat_with_fallback(&strategy("local-model"), &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "ok");
+        // Expectations validated on drop (unmatched → panic).
+    }
+
+    /// P5+.7: without `thinking: disabled`, the request body does NOT contain
+    /// the `thinking` key.
+    #[tokio::test]
+    async fn from_config_thinking_absent_by_default() {
+        use httptest::matchers::{json_decoded, request};
+        use httptest::{Expectation, Server};
+        use serde_json::json;
+
+        let srv = Server::run();
+        let url = srv.url_str("/v1");
+
+        srv.expect(
+            Expectation::matching(request::body(json_decoded(|v: &serde_json::Value| {
+                // model mapping still works
+                let model_ok = v.get("model").and_then(|m| m.as_str()) == Some("upstream-y");
+                // thinking must NOT be present
+                let no_thinking = v.get("thinking").is_none();
+                model_ok && no_thinking
+            })))
+            .respond_with(httptest::responders::json_encoded(json!({
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "no-thinking"}, "finish_reason": "stop"}]
+            }))),
+        );
+
+        let yaml = format!(
+            r#"providers:
+  openai_compat:
+    type: openai_compat
+    api_key_env: HOME
+
+models:
+  - id: local-model-2
+    provider: openai_compat
+    base_url: {url}
+    model_id: upstream-y
+"#
+        );
+        let cfg = parse_config(&yaml);
+        let router = Router::from_models_config(&cfg, &strategy("local-model-2")).unwrap();
+
+        let resp = router
+            .chat_with_fallback(&strategy("local-model-2"), &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "no-thinking");
     }
 
     #[test]

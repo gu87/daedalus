@@ -101,6 +101,11 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
+    /// P5+.7: expose accumulated conversation messages (read-only, for test assertions).
+    pub fn messages(&self) -> &[ChatMessage] {
+        &self.messages
+    }
+
     /// Build an AgentLoop with pre-built components (test / internal use).
     pub fn with_components(
         agent_id: String,
@@ -298,12 +303,16 @@ impl AgentLoop {
                             self.messages.push(ChatMessage {
                                 role: "system".into(),
                                 content: system,
+                                tool_call_id: None,
+                                tool_calls: vec![],
                             });
                             // P3.4: inject retry feedback AFTER system prompt.
                             if let Some(feedback) = self.pending_retry_feedback.take() {
                                 self.messages.push(ChatMessage {
                                     role: "system".into(),
                                     content: feedback,
+                                    tool_call_id: None,
+                                    tool_calls: vec![],
                                 });
                             }
                             LoopState::SendingToLLM {
@@ -352,9 +361,12 @@ impl AgentLoop {
                 } => {
                     match self.next_chunk_with_cancel(&mut stream).await {
                         Err(agent_error) => {
+                            // P5+.7: stream error — do not save incomplete tool_calls.
                             self.messages.push(ChatMessage {
                                 role: "assistant".into(),
                                 content: assistant_text,
+                                tool_call_id: None,
+                                tool_calls: vec![],
                             });
                             LoopState::Failed {
                                 reason: agent_error.reason,
@@ -363,11 +375,14 @@ impl AgentLoop {
                             }
                         }
                         Ok(None) => {
-                            // Stream ended.  Push assistant text, then
-                            // process pending tool calls in order.
+                            // Stream ended.  Push assistant message with
+                            // tool_calls (P5+.7), then process pending tools.
+                            let saved = tool_calls.clone();
                             self.messages.push(ChatMessage {
                                 role: "assistant".into(),
                                 content: assistant_text.clone(),
+                                tool_call_id: None,
+                                tool_calls: saved,
                             });
                             if tool_calls.is_empty() {
                                 LoopState::BuildingResponse {
@@ -398,9 +413,13 @@ impl AgentLoop {
                         }
                         Ok(Some(StreamChunk::Done)) => {
                             // Treat explicit Done the same as stream EOF.
+                            // P5+.7: clone tool_calls before checking empty.
+                            let saved = tool_calls.clone();
                             self.messages.push(ChatMessage {
                                 role: "assistant".into(),
                                 content: std::mem::take(&mut assistant_text),
+                                tool_call_id: None,
+                                tool_calls: saved,
                             });
                             if tool_calls.is_empty() {
                                 LoopState::BuildingResponse {
@@ -441,6 +460,8 @@ impl AgentLoop {
                                         self.messages.push(ChatMessage {
                                             role: "tool".into(),
                                             content: tool_result.output.clone(),
+                                            tool_call_id: Some(tool_call.id.clone()),
+                                            tool_calls: vec![],
                                         });
 
                                         if tool_call.name == "task_done" && !tool_result.is_error {
@@ -474,6 +495,8 @@ impl AgentLoop {
                             self.messages.push(ChatMessage {
                                 role: "tool".into(),
                                 content: format!("error: {e}"),
+                                tool_call_id: Some(tool_call.id.clone()),
+                                tool_calls: vec![],
                             });
                             LoopState::Failed {
                                 reason: e.reason,
@@ -515,6 +538,8 @@ impl AgentLoop {
                                                     self.messages.push(ChatMessage {
                                                         role: "tool".into(),
                                                         content: tool_result.output.clone(),
+                                                        tool_call_id: Some(tool_call.id.clone()),
+                                                        tool_calls: vec![],
                                                     });
                                                     if tool_call.name == "task_done"
                                                         && !tool_result.is_error
@@ -548,6 +573,8 @@ impl AgentLoop {
                                             self.messages.push(ChatMessage {
                                                 role: "tool".into(),
                                                 content: format!("error: {e}"),
+                                                tool_call_id: Some(tool_call.id.clone()),
+                                                tool_calls: vec![],
                                             });
                                             LoopState::Failed {
                                                 reason: e.reason,
@@ -561,10 +588,20 @@ impl AgentLoop {
                                     self.messages.push(ChatMessage {
                                         role: "tool".into(),
                                         content: "denied".into(),
+                                        tool_call_id: Some(tool_call.id.clone()),
+                                        tool_calls: vec![],
                                     });
-                                    LoopState::SendingToLLM {
-                                        messages: self.messages.clone(),
-                                        tools: self.tool_registry.definitions(),
+                                    // P5+.7: process remaining pending tool calls
+                                    // from the same batch so every assistant
+                                    // tool_call has a matching tool result.
+                                    if !self.pending_tool_calls.is_empty() {
+                                        let next = self.pending_tool_calls.remove(0);
+                                        LoopState::ExecutingTool { tool_call: next }
+                                    } else {
+                                        LoopState::SendingToLLM {
+                                            messages: self.messages.clone(),
+                                            tools: self.tool_registry.definitions(),
+                                        }
                                     }
                                 }
                             }
