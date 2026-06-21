@@ -1,6 +1,6 @@
 # P5+.6 完成报告：`daedalus run` — 终端任务命令
 
-> commits: `e4a0cb1`, fixup: 待提交
+> commits: `e4a0cb1`, fixups: `3851195`, `810322e`
 
 ---
 
@@ -33,7 +33,7 @@
 
 ```
 pytest daedalus-orch/tests/test_cli_run.py -v
-============================== 14 passed in 1.27s ==============================
+============================== 16 passed in 1.31s ==============================
 ```
 
 | # | 测试 | 类型 |
@@ -52,6 +52,8 @@ pytest daedalus-orch/tests/test_cli_run.py -v
 | 12 | test_arg_timeout_nan_rejected | 集成 |
 | 13 | test_arg_empty_agent_rejected | 集成 |
 | 14 | test_run_permission_non_tty_auto_denied_flow | **集成流** |
+| 15 | test_run_permission_tty_approved_flow | **集成流（in-process TTY）** |
+| 16 | test_arg_timeout_zero_rejected | 集成 |
 
 ---
 
