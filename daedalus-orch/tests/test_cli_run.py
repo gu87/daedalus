@@ -157,3 +157,78 @@ def test_arg_empty_goal_rejected():
 def test_arg_negative_timeout_rejected():
     result = _run_cli("run", "test", "--timeout", "-1", "--socket", "/tmp/test.sock")
     assert result.returncode == 2
+
+
+def test_arg_timeout_nan_rejected():
+    result = _run_cli("run", "test", "--timeout", "nan", "--socket", "/tmp/test.sock")
+    assert result.returncode == 2
+
+
+def test_arg_empty_agent_rejected():
+    result = _run_cli("run", "test", "--agent", "", "--socket", "/tmp/test.sock")
+    assert result.returncode == 2
+
+
+def test_run_permission_non_tty_auto_denied_flow():
+    """Mock daemon sends permission.request → non-TTY → auto-denied → task.done."""
+    sock_dir = tempfile.mkdtemp()
+    sock_path = os.path.join(sock_dir, "test.sock")
+
+    async def handler(reader, writer):
+        buf = b""
+        while True:
+            chunk = await reader.read(4096)
+            if not chunk: break
+            buf += chunk
+            while b"\n" in buf:
+                nl = buf.index(b"\n")
+                line = buf[:nl].decode()
+                buf = buf[nl + 1:]
+                msg = json.loads(line)
+                t = msg.get("type")
+                if t == "task.dispatch":
+                    writer.write(json.dumps({
+                        "type": "permission.request",
+                        "ts": "2026-01-01T00:00:00.000Z",
+                        "permission_id": "perm-2",
+                        "req_id": msg["req_id"],
+                        "agent_id": msg["agent_id"],
+                        "tool": "terminal",
+                        "args": {"cmd": "rm"},
+                    }).encode() + b"\n")
+                    await writer.drain()
+                    while True:
+                        chunk2 = await reader.read(4096)
+                        if not chunk2: return
+                        buf += chunk2
+                        if b"\n" in buf:
+                            nl2 = buf.index(b"\n")
+                            line2 = buf[:nl2].decode()
+                            buf = buf[nl2 + 1:]
+                            resp = json.loads(line2)
+                            if resp.get("type") == "permission.response":
+                                assert resp["decision"] == "denied"
+                                writer.write(json.dumps({
+                                    "type": "task.done",
+                                    "ts": "2026-01-01T00:00:00.000Z",
+                                    "req_id": msg["req_id"],
+                                    "agent_id": msg["agent_id"],
+                                    "task_id": msg["task_id"],
+                                    "outbox": {"summary": "denied-ok", "task_id": msg["task_id"], "agent_id": msg["agent_id"]},
+                                }).encode() + b"\n")
+                                await writer.drain()
+                                return
+
+    async def _run():
+        server = await asyncio.start_unix_server(handler, sock_path)
+        await asyncio.sleep(0.1)
+        import concurrent.futures
+        loop = asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            # No stdin → non-TTY, auto-deny.
+            result = await loop.run_in_executor(
+                pool, lambda: _run_cli("run", "test", "--socket", sock_path))
+        server.close()
+        await server.wait_closed()
+        assert result.returncode == 0
+    asyncio.run(_run())

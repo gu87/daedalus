@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -35,7 +36,7 @@ def _terminal_permission_handler(perm: dict[str, Any]) -> str:
 
     try:
         ans = input(prompt).strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         print("", file=sys.stderr)
         return "denied"
 
@@ -95,8 +96,8 @@ async def _run(args: argparse.Namespace) -> None:
         sys.exit(2)
 
     timeout = args.timeout
-    if timeout <= 0:
-        print("error: --timeout must be positive", file=sys.stderr)
+    if timeout <= 0 or not math.isfinite(timeout):
+        print("error: --timeout must be positive and finite", file=sys.stderr)
         sys.exit(2)
 
     task_id, task_card = build_task_card(goal, agent)
@@ -105,11 +106,11 @@ async def _run(args: argparse.Namespace) -> None:
     assert agent == task_card["execution_plan"]["primary_agent"]
 
     try:
-        async with DaedalusClient(
-            args.socket, on_permission=_terminal_permission_handler
-        ) as client:
+        async with DaedalusClient(args.socket) as client:
             result = await client.dispatch(
-                agent, task_id, task_card, timeout=timeout,
+                agent, task_id, task_card,
+                permission_handler=_terminal_permission_handler,
+                timeout=timeout,
             )
             # Output task.done JSON directly.
             print(json.dumps(result["done"], ensure_ascii=False))

@@ -18,15 +18,19 @@ export DEEPSEEK_API_KEY=sk-...
 # Launch daemon + desktop (production mode, uses dist/)
 bash scripts/dogfood.sh
 
-# Terminal quick task
+# Install Python CLI (development mode)
+python3 -m pip install -e daedalus-orch
+
+# Terminal quick task (daemon must be running separately)
 daedalus run "echo hello"
 daedalus run "目标" --agent daedalus-desktop --timeout 300
 
+# Or get socket from daemon health:
+SOCK=$(curl -sf http://127.0.0.1:9800/api/health | python3 -c "import sys,json; print(json.load(sys.stdin)['socket_path'])")
+daedalus run "echo hello" --socket "$SOCK"
+
 # Frontend dev only (browser mock, no Electron)
 cd daedalus-desktop && npm run dev
-
-# Install Python CLI (development mode)
-python3 -m pip install -e daedalus-orch
 ```
 
 ## Phase 3–5 capabilities
