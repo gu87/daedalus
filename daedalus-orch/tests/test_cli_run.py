@@ -232,3 +232,91 @@ def test_run_permission_non_tty_auto_denied_flow():
         await server.wait_closed()
         assert result.returncode == 0
     asyncio.run(_run())
+
+def test_run_permission_tty_approved_flow():
+    """In-process integration: monkeypatch TTY → approved → task.done."""
+    import argparse as ap
+    import io as _io
+
+    sock_dir = tempfile.mkdtemp()
+    sock_path = os.path.join(sock_dir, "test.sock")
+
+    import daedalus.orch.cli as cli_mod
+
+    async def handler(reader, writer):
+        buf = b""
+        while True:
+            chunk = await reader.read(4096)
+            if not chunk: break
+            buf += chunk
+            while b"\n" in buf:
+                nl = buf.index(b"\n")
+                line = buf[:nl].decode()
+                buf = buf[nl + 1:]
+                msg = json.loads(line)
+                t = msg.get("type")
+                if t == "task.dispatch":
+                    writer.write(json.dumps({
+                        "type": "permission.request",
+                        "ts": "2026-01-01T00:00:00.000Z",
+                        "permission_id": "perm-tty-1",
+                        "req_id": msg["req_id"],
+                        "agent_id": msg["agent_id"],
+                        "tool": "terminal",
+                        "args": {"cmd": "echo hi"},
+                    }).encode() + b"\n")
+                    await writer.drain()
+                    while True:
+                        chunk2 = await reader.read(4096)
+                        if not chunk2: return
+                        buf += chunk2
+                        if b"\n" in buf:
+                            nl2 = buf.index(b"\n")
+                            line2 = buf[:nl2].decode()
+                            buf = buf[nl2 + 1:]
+                            resp = json.loads(line2)
+                            if resp.get("type") == "permission.response":
+                                assert resp["decision"] == "approved", f"expected approved, got {resp}"
+                                writer.write(json.dumps({
+                                    "type": "task.done",
+                                    "ts": "2026-01-01T00:00:00.000Z",
+                                    "req_id": msg["req_id"],
+                                    "agent_id": msg["agent_id"],
+                                    "task_id": msg["task_id"],
+                                    "outbox": {"summary": "tty-ok", "task_id": msg["task_id"], "agent_id": msg["agent_id"]},
+                                }).encode() + b"\n")
+                                await writer.drain()
+                                return
+
+    async def _run():
+        server = await asyncio.start_unix_server(handler, sock_path)
+        await asyncio.sleep(0.1)
+
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+             mock.patch("builtins.input", return_value="y"):
+            args = ap.Namespace(
+                goal="test", agent="daedalus-desktop",
+                socket=sock_path, timeout=30.0,
+            )
+            old_stdout = sys.stdout
+            sys.stdout = _io.StringIO()
+            try:
+                exit_code = 0
+                try:
+                    await cli_mod._run(args)
+                except SystemExit as e:
+                    exit_code = e.code
+                output = sys.stdout.getvalue()
+                assert exit_code == 0, f"exit={exit_code}, output={output}"
+                assert "outbox" in output
+            finally:
+                sys.stdout = old_stdout
+
+        server.close()
+        await server.wait_closed()
+    asyncio.run(_run())
+
+
+def test_arg_timeout_zero_rejected():
+    result = _run_cli("run", "test", "--timeout", "0", "--socket", "/tmp/test.sock")
+    assert result.returncode == 2
