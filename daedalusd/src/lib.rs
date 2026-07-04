@@ -8,5 +8,6 @@ pub mod http;
 pub mod ipc;
 pub mod llm;
 pub mod pipeline;
+pub mod run_artifacts;
 pub mod tools;
 pub mod types;

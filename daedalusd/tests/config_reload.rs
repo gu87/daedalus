@@ -33,6 +33,8 @@ fn make_config(dir: &tempfile::TempDir) -> DaedalusConfig {
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
         daedalus_md_path: "DAEDALUS.md".into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     }
 }
 

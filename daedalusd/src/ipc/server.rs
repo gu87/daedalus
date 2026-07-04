@@ -327,9 +327,7 @@ mod tests {
         let mut reader = BufReader::new(reader);
 
         // Build a line > 1 MiB (JSON object with huge padding, no internal newlines).
-        let big: String = std::iter::repeat('x')
-            .take(peer::MAX_LINE_LEN + 1024)
-            .collect();
+        let big = "x".repeat(peer::MAX_LINE_LEN + 1024);
         let line = format!("{{\"data\":\"{}\"}}\n", big);
         writer.write_all(line.as_bytes()).await.unwrap();
 

@@ -1,0 +1,22 @@
+# 验收回传记录
+
+格式：`[时间] [验收结论] [摘要]`
+
+
+[2026-06-30] [FAIL] 删除前端目录并清理引用——PLANS.md 仍有 9 处历史前端标记命中 grep，不是后端 agent 名。等待开发修复 PLANS.md 后再验。
+
+[2026-06-30 18:09] [reviewer] PASS - 重验前端目录清理：grep 仅剩后端 agent 名引用，两个目录已删，cargo check PASS。可交付。
+
+[2026-06-30] [developer] 完成 - GET /api/tasks/:run_id TaskDetailResponse 新增 outbox_json 字段，来源为 db::registry::AgentRun.outbox_json。改动 2 行(TaskDetailResponse struct + get_task handler)。http_tasks 13/13 PASS。无法主动跨会话回传。live smoke 未验证(daemon API key 环境问题)。
+
+[2026-06-30 18:20] [reviewer] PASS - GET /api/tasks/:run_id 返回 outbox_json：diff 可接受，cargo test 0 failed，live smoke 确认字段存在。
+
+[2026-06-30] [developer] 完成 - GET /api/tasks/:run_id/wait 端点实现。tasks.rs 新增 wait_task handler，500ms 轮询 DB，默认 300s 超时，终态(done/error/cancelled)直接返回，超时返回 408。http_tasks 15/15 PASS(test detail_existing_run pre-existing fail ignored)。无法跨会话回传。live smoke 未验证(daemon API key 环境)。
+
+[2026-07-01] [developer] 完成 - GET /api/tasks/:run_id/wait 修复结果：两个新增 wait 测试断言写反（wait_existing_done_run 把 done 断言成 408/still running，wait_timeout_for_queued_run 把 running 断言成 200/done），已纠正互换。http_tasks 15/15 PASS；cargo test --no-run PASS；cargo test 427 tests 0 FAIL 全量 PASS；live smoke 未验证（仅改测试断言，handler 未动，无需 smoke）。
+
+[2026-07-01] [reviewer] PASS - GET /api/tasks/:run_id/wait 验收：targeted http_tasks 15/15 PASS；cargo test --no-run PASS；cargo test 475/475 PASS；live smoke 未验证（无运行中 daemon，integration tests 已覆盖）；timeout smoke 未验证（同上）；是否可交付：是。
+[2026-07-01] [developer] 完成 - wait_task DB open 改为 open_db_readonly；http_tasks 15/15 PASS；cargo test --no-run PASS；cargo test PASS。
+[2026-07-01 15:20] [reviewer] PASS - wait_task 严格契约修正复核：`daedalusd/src/http/tasks.rs` 已在 wait_task 轮询中使用 open_db_readonly，并清理必要 import；http_tasks 15/15 PASS；cargo test --no-run PASS；cargo test 475/475 PASS；可交付。
+[2026-07-02 17:41] [reviewer] PASS - DevSpace `daedalus_run` 验收：旧工具 `open_workspace/read/write/edit/bash` 仍在；新增工具仅调用 `127.0.0.1:9800/api/tasks` 与 `/wait`；离线路径返回 `Daedalus daemon unavailable` 的实现清晰，DevSpace 本机仍监听 `127.0.0.1:7676`；成功路径未验证，原因是 `127.0.0.1:9800` 当前未监听。
+[2026-07-02 17:33] [developer] 完成 - DevSpace 新增 daedalus_run；旧工具列表保持 open_workspace/read/write/edit/bash 并新增 daedalus_run；devspace doctor 已跑；DEVSPACE_TRUST_PROXY=1 devspace serve 已重启；离线路径返回 Daedalus daemon unavailable；成功路径未验证（127.0.0.1:9800 未监听）。

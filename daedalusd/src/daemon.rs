@@ -104,10 +104,13 @@ impl DaemonContext {
         td: &TaskDispatch,
         writer_tx: mpsc::Sender<Message>,
         session_state: Arc<SessionState>,
+        override_run_id: Option<String>,
+        // override_run_id: HTTP /api/tasks can supply a run_id; IPC leaves as None.
     ) -> Option<Message> {
         // ── Pre-clone everything from td (spawn_blocking closures cannot
         //     borrow &TaskDispatch). ──
-        let first_run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let first_run_id =
+            override_run_id.unwrap_or_else(|| format!("run-{}", uuid::Uuid::new_v4()));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -191,8 +194,7 @@ impl DaemonContext {
             let aid = initial_agent_id.clone();
             let t = now;
             let result = tokio::task::spawn_blocking(move || {
-                let conn = pool::open(&dbp)
-                    .map_err(|e| DaedalusError::Database(format!("{e}")))?;
+                let conn = pool::open(&dbp).map_err(|e| DaedalusError::Database(format!("{e}")))?;
                 // Created → Dispatched → Running
                 crate::pipeline::db::insert_task(&conn, &tid, Some(&aid), t)?;
                 crate::pipeline::db::update_status(&conn, &tid, "dispatched", t)?;
@@ -202,10 +204,7 @@ impl DaemonContext {
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    eprintln!(
-                        "daedalusd pipeline: failed to create task {}: {e}",
-                        task_id
-                    );
+                    eprintln!("daedalusd pipeline: failed to create task {}: {e}", task_id);
                 }
                 Err(_) => {
                     eprintln!(
@@ -272,6 +271,7 @@ impl DaemonContext {
                         let tid = task_id.clone();
                         let aid = current_agent_id.clone();
                         let rid = req_id.clone();
+                        let pid = prev_run_id.clone();
                         let tid2 = tid.clone();
                         let _ = crate::ipc::reliable::send_reliable_event(
                             &writer_tx2,
@@ -285,12 +285,18 @@ impl DaemonContext {
                                     req_id: rid,
                                     agent_id: aid,
                                     task_id: tid,
+                                    run_id: Some(pid),
                                     outbox,
                                 }))
                             },
                         )
                         .await;
-                        update_pipeline(&db_path, task_id.clone(), "waiting_for_verification".into()).await;
+                        update_pipeline(
+                            &db_path,
+                            task_id.clone(),
+                            "waiting_for_verification".into(),
+                        )
+                        .await;
                         break;
                     }
                     Err(agent_error) => {
@@ -307,6 +313,7 @@ impl DaemonContext {
                             GateAction::HardStop => {
                                 let taxonomy = agent_error.error_code().as_str().to_string();
                                 let detail = agent_error.detail.clone();
+                                let pid = prev_run_id.clone();
                                 let tid = task_id.clone();
                                 let aid = current_agent_id.clone();
                                 let rid = req_id.clone();
@@ -323,6 +330,7 @@ impl DaemonContext {
                                             req_id: rid,
                                             agent_id: aid,
                                             task_id: tid,
+                                            run_id: Some(pid.clone()),
                                             error_taxonomy: taxonomy.clone(),
                                             detail,
                                         })
@@ -357,6 +365,7 @@ impl DaemonContext {
                                             let _tid_r = tid.clone();
                                             let aid = target_agent_id.clone();
                                             let rid = req_id.clone();
+                                            let pid = prev_run_id.clone();
                                             let detail =
                                                 format!("failed to build switch AgentLoop: {e}");
                                             let _ = crate::ipc::reliable::send_reliable_event(
@@ -371,6 +380,7 @@ impl DaemonContext {
                                                         req_id: rid,
                                                         agent_id: aid,
                                                         task_id: tid,
+                                                        run_id: Some(pid),
                                                         error_taxonomy: ErrorCode::Unknown
                                                             .as_str()
                                                             .into(),
@@ -379,7 +389,12 @@ impl DaemonContext {
                                                 },
                                             )
                                             .await;
-                                            update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
+                                            update_pipeline(
+                                                &db_path,
+                                                task_id.clone(),
+                                                "failed".into(),
+                                            )
+                                            .await;
                                             break;
                                         }
                                     };
@@ -418,15 +433,31 @@ impl DaemonContext {
                                 match insert_result {
                                     Ok(Ok(())) => {
                                         // P5.3b: Running -> Blocked -> Dispatched -> Running
-                                        update_pipeline(&db_path, task_id.clone(), "blocked".into()).await;
-                                        update_pipeline(&db_path, task_id.clone(), "dispatched".into()).await;
-                                        update_pipeline(&db_path, task_id.clone(), "running".into()).await;
+                                        update_pipeline(
+                                            &db_path,
+                                            task_id.clone(),
+                                            "blocked".into(),
+                                        )
+                                        .await;
+                                        update_pipeline(
+                                            &db_path,
+                                            task_id.clone(),
+                                            "dispatched".into(),
+                                        )
+                                        .await;
+                                        update_pipeline(
+                                            &db_path,
+                                            task_id.clone(),
+                                            "running".into(),
+                                        )
+                                        .await;
                                     }
                                     Ok(Err(e)) => {
                                         let tid = task_id.clone();
                                         let _tid_r = tid.clone();
                                         let aid = target_agent_id.clone();
                                         let rid = req_id.clone();
+                                        let pid = prev_run_id.clone();
                                         let detail =
                                             format!("failed to insert switch agent_runs row: {e}");
                                         let _ = crate::ipc::reliable::send_reliable_event(
@@ -441,6 +472,7 @@ impl DaemonContext {
                                                     req_id: rid,
                                                     agent_id: aid,
                                                     task_id: tid.clone(),
+                                                    run_id: Some(pid),
                                                     error_taxonomy: ErrorCode::Unknown
                                                         .as_str()
                                                         .into(),
@@ -449,7 +481,8 @@ impl DaemonContext {
                                             },
                                         )
                                         .await;
-                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into())
+                                            .await;
                                         break;
                                     }
                                     Err(_) => {
@@ -457,6 +490,7 @@ impl DaemonContext {
                                         let _tid_r = tid.clone();
                                         let aid = target_agent_id.clone();
                                         let rid = req_id.clone();
+                                        let pid = prev_run_id.clone();
                                         let _ = crate::ipc::reliable::send_reliable_event(
                                             &writer_tx2, &ledger, &tid.clone(), "task.error",
                                             move |event_id| {
@@ -465,13 +499,15 @@ impl DaemonContext {
                                                     event_id: Some(event_id),
                                                     req_id: rid,
                                                     agent_id: aid,
-                                                    task_id: tid.clone(),
-                                                    error_taxonomy: ErrorCode::Unknown.as_str().into(),
+                                    task_id: tid.clone(),
+                                    run_id: Some(pid),
+                                    error_taxonomy: ErrorCode::Unknown.as_str().into(),
                                                     detail: "spawn_blocking panic during switch insert_run".into(),
                                                 })
                                             },
                                         ).await;
-                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into())
+                                            .await;
                                         break;
                                     }
                                 }
@@ -517,6 +553,7 @@ impl DaemonContext {
                                             let _tid_r = tid.clone();
                                             let aid = current_agent_id.clone();
                                             let rid = req_id.clone();
+                                            let pid = prev_run_id.clone();
                                             let detail =
                                                 format!("failed to build retry AgentLoop: {e}");
                                             let _ = crate::ipc::reliable::send_reliable_event(
@@ -531,6 +568,7 @@ impl DaemonContext {
                                                         req_id: rid,
                                                         agent_id: aid,
                                                         task_id: tid,
+                                                        run_id: Some(pid),
                                                         error_taxonomy: ErrorCode::Unknown
                                                             .as_str()
                                                             .into(),
@@ -539,7 +577,12 @@ impl DaemonContext {
                                                 },
                                             )
                                             .await;
-                                            update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
+                                            update_pipeline(
+                                                &db_path,
+                                                task_id.clone(),
+                                                "failed".into(),
+                                            )
+                                            .await;
                                             break;
                                         }
                                     };
@@ -582,6 +625,7 @@ impl DaemonContext {
                                         let _tid_r = tid.clone();
                                         let aid = current_agent_id.clone();
                                         let rid = req_id.clone();
+                                        let pid = prev_run_id.clone();
                                         let detail =
                                             format!("failed to insert retry agent_runs row: {e}");
                                         let _ = crate::ipc::reliable::send_reliable_event(
@@ -596,6 +640,7 @@ impl DaemonContext {
                                                     req_id: rid,
                                                     agent_id: aid,
                                                     task_id: tid.clone(),
+                                                    run_id: Some(pid),
                                                     error_taxonomy: ErrorCode::Unknown
                                                         .as_str()
                                                         .into(),
@@ -604,7 +649,8 @@ impl DaemonContext {
                                             },
                                         )
                                         .await;
-                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into())
+                                            .await;
                                         break;
                                     }
                                     Err(_) => {
@@ -612,6 +658,7 @@ impl DaemonContext {
                                         let _tid_r = tid.clone();
                                         let aid = current_agent_id.clone();
                                         let rid = req_id.clone();
+                                        let pid = prev_run_id.clone();
                                         let _ = crate::ipc::reliable::send_reliable_event(
                                             &writer_tx2, &ledger, &tid.clone(), "task.error",
                                             move |event_id| {
@@ -620,13 +667,15 @@ impl DaemonContext {
                                                     event_id: Some(event_id),
                                                     req_id: rid,
                                                     agent_id: aid,
-                                                    task_id: tid.clone(),
-                                                    error_taxonomy: ErrorCode::Unknown.as_str().into(),
+                                    task_id: tid.clone(),
+                                    run_id: Some(pid),
+                                    error_taxonomy: ErrorCode::Unknown.as_str().into(),
                                                     detail: "spawn_blocking panic during retry insert_run".into(),
                                                 })
                                             },
                                         ).await;
-                                        update_pipeline(&db_path, task_id.clone(), "failed".into()).await;
+                                        update_pipeline(&db_path, task_id.clone(), "failed".into())
+                                            .await;
                                         break;
                                     }
                                 }

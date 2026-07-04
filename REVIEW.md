@@ -53,7 +53,7 @@ cargo clippy --workspace -- -D warnings             ✅ clean
 
 ### E2E
 ```
-daedalus run --agent daedalus-desktop "confirm task done with message: hello world"
+daedalus run  "confirm task done with message: hello world"
 → exit 0
 → {"type":"task.done",...,"status":"waiting_for_verification",...}
 ```

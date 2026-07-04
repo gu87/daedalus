@@ -3,9 +3,9 @@
 //! Phase 2 scope: models.yaml deserialisation + Router construction.
 //! managed-agents.yaml parsing → P2.4 (PromptBuilder / Agent config).
 
-use std::collections::HashMap;
-
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::ffi::OsStr;
 
 use crate::error::DaedalusError;
 use crate::types::ModelConfig;
@@ -127,6 +127,69 @@ pub fn load_models_yaml(path: &str) -> Result<ModelsConfig, DaedalusError> {
 
 // ── DaedalusConfig (runtime paths) ─────────────────────────────────────
 
+/// Hook configuration — zero or more shell scripts per event.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    pub task_done: Vec<String>,
+    pub task_error: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DaemonRuntimeConfig {
+    runs_dir: Option<String>,
+    hooks: HooksConfig,
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        return std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        return format!("{home}/{rest}");
+    }
+    path.to_string()
+}
+
+fn default_daemon_config_path() -> String {
+    std::env::var("DAEDALUS_DAEMON_CONFIG_PATH").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        format!("{home}/.daedalus/config/daemon.yaml")
+    })
+}
+
+fn load_daemon_runtime_config(path: &str) -> DaemonRuntimeConfig {
+    match std::fs::read_to_string(path) {
+        Ok(content) => match serde_yaml::from_str::<DaemonRuntimeConfig>(&content) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("daedalusd config: failed to parse {path}: {e}");
+                DaemonRuntimeConfig::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DaemonRuntimeConfig::default(),
+        Err(e) => {
+            eprintln!("daedalusd config: failed to read {path}: {e}");
+            DaemonRuntimeConfig::default()
+        }
+    }
+}
+
+fn load_hook_paths_from_env(var: &str) -> Option<Vec<String>> {
+    let raw = std::env::var_os(var)?;
+    if raw.is_empty() {
+        return Some(vec![]);
+    }
+    Some(
+        std::env::split_paths(OsStr::new(&raw))
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| expand_tilde(&path.to_string_lossy()))
+            .collect(),
+    )
+}
+
 /// Centralised runtime configuration.
 ///
 /// All paths can be overridden via environment variables; otherwise sensible
@@ -149,12 +212,41 @@ pub struct DaedalusConfig {
     pub http_addr: String,
     /// P5.1: path to DAEDALUS.md project-level instructions.
     pub daedalus_md_path: String,
+    /// Phase X: root directory for run transcripts and summaries.
+    pub runs_dir: String,
+    /// Phase X: hook script paths keyed by event.
+    pub hooks: HooksConfig,
 }
 
 impl DaedalusConfig {
     /// Build a config, reading overrides from the environment.
     pub fn load() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let daemon_config = load_daemon_runtime_config(&default_daemon_config_path());
+        let runs_dir = std::env::var("DAEDALUS_RUNS_DIR")
+            .ok()
+            .or(daemon_config.runs_dir)
+            .unwrap_or_else(|| format!("{home}/.daedalus/runs"));
+        let daemon_hooks = HooksConfig {
+            task_done: daemon_config
+                .hooks
+                .task_done
+                .into_iter()
+                .map(|path| expand_tilde(&path))
+                .collect(),
+            task_error: daemon_config
+                .hooks
+                .task_error
+                .into_iter()
+                .map(|path| expand_tilde(&path))
+                .collect(),
+        };
+        let hooks = HooksConfig {
+            task_done: load_hook_paths_from_env("DAEDALUS_HOOK_TASK_DONE")
+                .unwrap_or(daemon_hooks.task_done),
+            task_error: load_hook_paths_from_env("DAEDALUS_HOOK_TASK_ERROR")
+                .unwrap_or(daemon_hooks.task_error),
+        };
         Self {
             soul_path: std::env::var("DAEDALUS_SOUL_PATH")
                 .unwrap_or_else(|_| format!("{home}/.daedalus/SOUL.md")),
@@ -170,6 +262,8 @@ impl DaedalusConfig {
                 .unwrap_or_else(|_| "127.0.0.1:9800".to_string()),
             daedalus_md_path: std::env::var("DAEDALUS_MD_PATH")
                 .unwrap_or_else(|_| "DAEDALUS.md".to_string()),
+            runs_dir: expand_tilde(&runs_dir),
+            hooks,
         }
     }
 
@@ -273,6 +367,8 @@ mod tests {
             gate_criteria_path: "/tmp/gate.yaml".into(),
             http_addr: "127.0.0.1:9800".into(),
             daedalus_md_path: "DAEDALUS.md".into(),
+            runs_dir: "/tmp/runs".into(),
+            hooks: crate::config::HooksConfig::default(),
         }
     }
 
@@ -287,6 +383,116 @@ mod tests {
         match saved {
             Some(v) => std::env::set_var("DAEDALUS_MD_PATH", v),
             None => std::env::remove_var("DAEDALUS_MD_PATH"),
+        }
+    }
+
+    #[test]
+    fn load_reads_runtime_config_file() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("daemon.yaml");
+        std::fs::write(
+            &path,
+            "runs_dir: ~/custom-runs\nhooks:\n  task_done:\n    - ~/.daedalus/hooks/task_done.sh\n  task_error:\n    - /tmp/task_error.sh\n",
+        )
+        .unwrap();
+
+        let saved_cfg = std::env::var("DAEDALUS_DAEMON_CONFIG_PATH").ok();
+        let saved_runs = std::env::var("DAEDALUS_RUNS_DIR").ok();
+        std::env::set_var("DAEDALUS_DAEMON_CONFIG_PATH", &path);
+        std::env::remove_var("DAEDALUS_RUNS_DIR");
+
+        let config = DaedalusConfig::load();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        assert_eq!(config.runs_dir, format!("{home}/custom-runs"));
+        assert_eq!(
+            config.hooks.task_done,
+            vec![format!("{home}/.daedalus/hooks/task_done.sh")]
+        );
+        assert_eq!(
+            config.hooks.task_error,
+            vec!["/tmp/task_error.sh".to_string()]
+        );
+
+        match saved_cfg {
+            Some(v) => std::env::set_var("DAEDALUS_DAEMON_CONFIG_PATH", v),
+            None => std::env::remove_var("DAEDALUS_DAEMON_CONFIG_PATH"),
+        }
+        match saved_runs {
+            Some(v) => std::env::set_var("DAEDALUS_RUNS_DIR", v),
+            None => std::env::remove_var("DAEDALUS_RUNS_DIR"),
+        }
+    }
+
+    #[test]
+    fn load_env_runs_dir_overrides_runtime_config() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("daemon.yaml");
+        std::fs::write(&path, "runs_dir: /tmp/from-daemon-yaml\n").unwrap();
+
+        let saved_cfg = std::env::var("DAEDALUS_DAEMON_CONFIG_PATH").ok();
+        let saved_runs = std::env::var("DAEDALUS_RUNS_DIR").ok();
+        std::env::set_var("DAEDALUS_DAEMON_CONFIG_PATH", &path);
+        std::env::set_var("DAEDALUS_RUNS_DIR", "/tmp/from-env");
+
+        let config = DaedalusConfig::load();
+        assert_eq!(config.runs_dir, "/tmp/from-env");
+
+        match saved_cfg {
+            Some(v) => std::env::set_var("DAEDALUS_DAEMON_CONFIG_PATH", v),
+            None => std::env::remove_var("DAEDALUS_DAEMON_CONFIG_PATH"),
+        }
+        match saved_runs {
+            Some(v) => std::env::set_var("DAEDALUS_RUNS_DIR", v),
+            None => std::env::remove_var("DAEDALUS_RUNS_DIR"),
+        }
+    }
+
+    #[test]
+    fn load_hook_env_overrides_runtime_config() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("daemon.yaml");
+        std::fs::write(
+            &path,
+            "hooks:\n  task_done:\n    - /tmp/from-daemon.sh\n  task_error:\n    - /tmp/from-daemon-error.sh\n",
+        )
+        .unwrap();
+
+        let saved_cfg = std::env::var("DAEDALUS_DAEMON_CONFIG_PATH").ok();
+        let saved_done = std::env::var_os("DAEDALUS_HOOK_TASK_DONE");
+        let saved_error = std::env::var_os("DAEDALUS_HOOK_TASK_ERROR");
+        let done = std::env::join_paths(["/tmp/from-env-a.sh", "/tmp/from-env-b.sh"]).unwrap();
+        std::env::set_var("DAEDALUS_DAEMON_CONFIG_PATH", &path);
+        std::env::set_var("DAEDALUS_HOOK_TASK_DONE", &done);
+        std::env::set_var("DAEDALUS_HOOK_TASK_ERROR", "/tmp/from-env-error.sh");
+
+        let config = DaedalusConfig::load();
+
+        assert_eq!(
+            config.hooks.task_done,
+            vec![
+                "/tmp/from-env-a.sh".to_string(),
+                "/tmp/from-env-b.sh".to_string()
+            ]
+        );
+        assert_eq!(
+            config.hooks.task_error,
+            vec!["/tmp/from-env-error.sh".to_string()]
+        );
+
+        match saved_cfg {
+            Some(v) => std::env::set_var("DAEDALUS_DAEMON_CONFIG_PATH", v),
+            None => std::env::remove_var("DAEDALUS_DAEMON_CONFIG_PATH"),
+        }
+        match saved_done {
+            Some(v) => std::env::set_var("DAEDALUS_HOOK_TASK_DONE", v),
+            None => std::env::remove_var("DAEDALUS_HOOK_TASK_DONE"),
+        }
+        match saved_error {
+            Some(v) => std::env::set_var("DAEDALUS_HOOK_TASK_ERROR", v),
+            None => std::env::remove_var("DAEDALUS_HOOK_TASK_ERROR"),
         }
     }
 }

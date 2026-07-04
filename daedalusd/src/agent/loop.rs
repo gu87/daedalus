@@ -81,10 +81,13 @@ pub struct LifecycleContext {
 /// The built-in Rust agent runtime.
 pub struct AgentLoop {
     pub(crate) agent_id: String,
+    /// "ask_user" (prompt), "auto" (always approve), or "deny_all" (always reject).
+    pub(crate) permission_mode: String,
     router: Arc<Router>,
     model_strategy: ModelStrategy,
     prompt_builder: PromptBuilder,
     pub(crate) tool_registry: Arc<ToolRegistry>,
+    allowed_tool_names: Vec<String>,
     permission_broker: Arc<dyn PermissionBroker>,
     cancel_token: CancellationToken,
     cancel_reason: Arc<CancelReason>,
@@ -107,8 +110,10 @@ impl AgentLoop {
     }
 
     /// Build an AgentLoop with pre-built components (test / internal use).
+    #[allow(clippy::too_many_arguments)]
     pub fn with_components(
         agent_id: String,
+        permission_mode: String,
         router: Arc<Router>,
         model_strategy: ModelStrategy,
         prompt_builder: PromptBuilder,
@@ -118,10 +123,12 @@ impl AgentLoop {
     ) -> Self {
         Self {
             agent_id,
+            permission_mode,
             router,
             model_strategy,
             prompt_builder,
             tool_registry,
+            allowed_tool_names: Vec::new(),
             permission_broker,
             cancel_token,
             cancel_reason: Arc::new(CancelReason::new()),
@@ -153,10 +160,12 @@ impl AgentLoop {
 
         Ok(Self {
             agent_id,
+            permission_mode: agent_config.permission.clone(),
             router,
             model_strategy,
             prompt_builder,
             tool_registry,
+            allowed_tool_names: agent_config.tools,
             permission_broker,
             cancel_token,
             cancel_reason: Arc::new(CancelReason::new()),
@@ -315,9 +324,20 @@ impl AgentLoop {
                                     tool_calls: vec![],
                                 });
                             }
+                            self.messages.push(ChatMessage {
+                                role: "user".into(),
+                                content: format!(
+                                    "当前任务:\n目标: {}\n编译意图: {}\n\n完成后调用 task_done，summary 必须直接回应目标。",
+                                    task.goal,
+                                    serde_json::to_string(&task.compiled_intent)
+                                        .unwrap_or_default()
+                                ),
+                                tool_call_id: None,
+                                tool_calls: vec![],
+                            });
                             LoopState::SendingToLLM {
                                 messages: self.messages.clone(),
-                                tools: self.tool_registry.definitions(),
+                                tools: self.tool_definitions(),
                             }
                         }
                         Err(e) => LoopState::Failed {
@@ -446,7 +466,29 @@ impl AgentLoop {
                     match self.check_tool_access(&tool_call) {
                         Ok(tool) => {
                             // Step 3: permission check.
-                            if tool.needs_permission(&tool_call.input) {
+                            let needs_perm = tool.needs_permission(&tool_call.input);
+                            if needs_perm && self.permission_mode.as_str() == "deny_all" {
+                                if tool_call.name == "task_done"
+                                    && !self.pending_tool_calls.is_empty()
+                                {
+                                    self.pending_tool_calls.clear();
+                                }
+                                self.messages.push(ChatMessage {
+                                    role: "tool".into(),
+                                    content: "denied: permission mode is deny_all".into(),
+                                    tool_call_id: Some(tool_call.id.clone()),
+                                    tool_calls: vec![],
+                                });
+                                if !self.pending_tool_calls.is_empty() {
+                                    let next = self.pending_tool_calls.remove(0);
+                                    LoopState::ExecutingTool { tool_call: next }
+                                } else {
+                                    LoopState::SendingToLLM {
+                                        messages: self.messages.clone(),
+                                        tools: self.tool_definitions(),
+                                    }
+                                }
+                            } else if needs_perm && self.permission_mode.as_str() != "auto" {
                                 LoopState::AwaitingPermission {
                                     tool_call,
                                     requested_at: Instant::now(),
@@ -471,7 +513,7 @@ impl AgentLoop {
                                                     task_id.clone(),
                                                     agent_id.clone(),
                                                 ),
-                                                summary: tool_result.output,
+                                                summary: task_done_summary(&tool_result.output),
                                             }
                                         } else if !self.pending_tool_calls.is_empty() {
                                             let next = self.pending_tool_calls.remove(0);
@@ -479,7 +521,7 @@ impl AgentLoop {
                                         } else {
                                             LoopState::SendingToLLM {
                                                 messages: self.messages.clone(),
-                                                tools: self.tool_registry.definitions(),
+                                                tools: self.tool_definitions(),
                                             }
                                         }
                                     }
@@ -550,7 +592,9 @@ impl AgentLoop {
                                                                 task_id.clone(),
                                                                 agent_id.clone(),
                                                             ),
-                                                            summary: tool_result.output,
+                                                            summary: task_done_summary(
+                                                                &tool_result.output,
+                                                            ),
                                                         }
                                                     } else if !self.pending_tool_calls.is_empty() {
                                                         let next = self.pending_tool_calls.remove(0);
@@ -558,7 +602,7 @@ impl AgentLoop {
                                                     } else {
                                                         LoopState::SendingToLLM {
                                                             messages: self.messages.clone(),
-                                                            tools: self.tool_registry.definitions(),
+                                                            tools: self.tool_definitions(),
                                                         }
                                                     }
                                                 }
@@ -600,7 +644,7 @@ impl AgentLoop {
                                     } else {
                                         LoopState::SendingToLLM {
                                             messages: self.messages.clone(),
-                                            tools: self.tool_registry.definitions(),
+                                            tools: self.tool_definitions(),
                                         }
                                     }
                                 }
@@ -881,6 +925,19 @@ impl AgentLoop {
         &self,
         tc: &ToolCall,
     ) -> Result<std::sync::Arc<dyn crate::tools::Tool>, AgentError> {
+        if !self.allowed_tool_names.is_empty()
+            && !self.allowed_tool_names.iter().any(|name| name == &tc.name)
+        {
+            return Err(AgentError {
+                reason: ErrorKind::ToolFailure,
+                detail: format!(
+                    "agent '{}' is not allowed to use tool '{}'",
+                    self.agent_id, tc.name
+                ),
+                provider_error: None,
+            });
+        }
+
         let tool = self.tool_registry.get(&tc.name).ok_or_else(|| AgentError {
             reason: ErrorKind::ToolFailure,
             detail: format!("unknown tool: {}", tc.name),
@@ -901,6 +958,21 @@ impl AgentLoop {
 
         Ok(std::sync::Arc::clone(tool))
     }
+
+    fn tool_definitions(&self) -> Vec<ToolDef> {
+        let definitions = self.tool_registry.definitions();
+        if self.allowed_tool_names.is_empty() {
+            return definitions;
+        }
+        definitions
+            .into_iter()
+            .filter(|tool| {
+                self.allowed_tool_names
+                    .iter()
+                    .any(|name| name == &tool.name)
+            })
+            .collect()
+    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -911,4 +983,30 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn task_done_summary(output: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|v| {
+            v.get("summary")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| output.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_done_summary;
+
+    #[test]
+    fn task_done_summary_extracts_json_summary() {
+        assert_eq!(task_done_summary(r#"{"summary":"OK"}"#), "OK");
+    }
+
+    #[test]
+    fn task_done_summary_keeps_plain_text() {
+        assert_eq!(task_done_summary("OK"), "OK");
+    }
 }

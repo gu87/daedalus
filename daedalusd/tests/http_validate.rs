@@ -24,6 +24,8 @@ fn test_config(db_path: &std::path::Path) -> daedalusd::config::DaedalusConfig {
         gate_criteria_path: "/nonexistent/gate.yaml".into(),
         http_addr: "127.0.0.1:0".into(),
         daedalus_md_path: "DAEDALUS.md".into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     }
 }
 
@@ -41,7 +43,7 @@ async fn start_server_with_models(
             config: config.clone(),
         }),
         gate_router: Arc::new(GateRouter::new(CriteriaRegistry::defaults(), 5)),
-        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(&db_path)),
+        ledger: Arc::new(daedalusd::db::ledger::Ledger::new(db_path)),
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

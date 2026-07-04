@@ -496,7 +496,7 @@ async def test_real_daemon_ping_pong():
 
         proc = subprocess.Popen(
             [daemon_bin],
-            env={**os.environ, "DAEDALUSD_SOCK": sock},
+            env={**os.environ, "DAEDALUSD_SOCK": sock, "DAEDALUSD_HTTP_ADDR": "127.0.0.1:0"},
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -506,7 +506,8 @@ async def test_real_daemon_ping_pong():
                 if time.monotonic() > deadline:
                     proc.kill()
                     proc.wait()
-                    pytest.fail("daedalusd did not create socket within 10s")
+                    err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+                    pytest.fail(f"daedalusd did not create socket within 10s\nstderr: {err}")
                 await asyncio.sleep(0.1)
 
             client = DaedalusClient(sock)

@@ -429,6 +429,8 @@ fn setup_full_chain(dir: &tempfile::TempDir) -> (PromptBuilder, String) {
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
         daedalus_md_path: "DAEDALUS.md".into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     };
 
     // Build PromptBuilder with a custom provider chain that uses MemoryPaths::with_home
@@ -654,6 +656,8 @@ fn prompt_builder_new_db_path_some_injects_history() {
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
         daedalus_md_path: "DAEDALUS.md".into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     };
     let pb = PromptBuilder::new(cfg);
     let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
@@ -702,6 +706,8 @@ fn prompt_builder_new_history_between_agent_and_skills() {
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
         daedalus_md_path: "DAEDALUS.md".into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     };
     let pb = PromptBuilder::new(cfg);
     let prompt = pb.build_system_prompt("test-agent", &dummy_task()).unwrap();
@@ -780,48 +786,45 @@ fn prompt_builder_new_includes_daedalus_between_soul_and_memory() {
         ("DAEDALUS_SOUL_PATH", &format!("{base}/SOUL.md")),
         (
             "DAEDALUS_MANAGED_AGENTS_PATH",
-            &config_dir
+            config_dir
                 .join("managed-agents.yaml")
                 .to_string_lossy()
-                .to_string(),
+                .as_ref(),
         ),
         ("DAEDALUS_SKILLS_DIR", &format!("{base}/skills")),
         ("DAEDALUS_MD_PATH", &format!("{base}/DAEDALUS.md")),
         (
             "DAEDALUS_MEMORY_MD_PATH",
-            &daedalus_dir.join("MEMORY.md").to_string_lossy().to_string(),
+            daedalus_dir.join("MEMORY.md").to_string_lossy().as_ref(),
         ),
         (
             "DAEDALUS_USER_MD_PATH",
-            &daedalus_dir.join("USER.md").to_string_lossy().to_string(),
+            daedalus_dir.join("USER.md").to_string_lossy().as_ref(),
         ),
         (
             "DAEDALUS_PREFERENCES_PATH",
-            &config_dir
+            config_dir
                 .join("user-preferences.json")
                 .to_string_lossy()
-                .to_string(),
+                .as_ref(),
         ),
         (
             "DAEDALUS_FEEDBACK_PATH",
-            &config_dir
+            config_dir
                 .join("feedback-memory.json")
                 .to_string_lossy()
-                .to_string(),
+                .as_ref(),
         ),
         (
             "DAEDALUS_PROJECT_CONTEXT_PATH",
-            &config_dir
+            config_dir
                 .join("project-context.json")
                 .to_string_lossy()
-                .to_string(),
+                .as_ref(),
         ),
         (
             "DAEDALUS_AUTHORITY_MAP_PATH",
-            &config_dir
-                .join("authority-map")
-                .to_string_lossy()
-                .to_string(),
+            config_dir.join("authority-map").to_string_lossy().as_ref(),
         ),
     ]);
 
@@ -868,6 +871,8 @@ fn daedalus_md_missing_silent_skip() {
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
         daedalus_md_path: missing.to_string_lossy().into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     };
 
     let pb = PromptBuilder::new(config);
@@ -907,6 +912,8 @@ fn daedalus_md_custom_path() {
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
         daedalus_md_path: custom_path.to_string_lossy().into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     };
 
     let pb = PromptBuilder::new(config);

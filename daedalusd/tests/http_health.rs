@@ -26,6 +26,8 @@ fn test_config(
         gate_criteria_path: gate_criteria_path.into(),
         http_addr: "127.0.0.1:0".into(),
         daedalus_md_path: "DAEDALUS.md".into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Uses TestAgentLoopFactory (FakeProvider + FakeTool) + real GateRouter
 //! + temp DB to cover spawn_task retry loop behaviour.
-//! P3.5 adds provider-error granularity tests.
+//!   P3.5 adds provider-error granularity tests.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -251,6 +251,7 @@ impl AgentLoopFactory for GateTestFactory {
 
         Ok(AgentLoop::with_components(
             agent_id,
+            "ask_user".into(),
             router,
             strategy,
             prompt_builder,
@@ -283,6 +284,8 @@ fn setup_config(dir: &tempfile::TempDir) -> DaedalusConfig {
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
         daedalus_md_path: "DAEDALUS.md".into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     }
 }
 
@@ -384,7 +387,7 @@ async fn hard_stop_default_tool_failure() {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -487,7 +490,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -586,7 +589,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -675,7 +678,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -763,7 +766,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -853,7 +856,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -951,7 +954,7 @@ async fn auth_failure_routes_as_auth_failure() {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1038,7 +1041,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1111,7 +1114,7 @@ async fn model_not_found_hard_stop() {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1175,7 +1178,7 @@ async fn provider_timeout_routes_provider_exhausted() {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1240,7 +1243,7 @@ async fn parse_error_routes_unknown() {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1309,7 +1312,7 @@ async fn tool_failure_no_provider_error_unchanged() {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1392,7 +1395,7 @@ async fn streaming_midflight_provider_error_preserved() {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1484,7 +1487,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1603,7 +1606,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1677,7 +1680,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1761,7 +1764,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1857,7 +1860,7 @@ async fn default_rules_unchanged_by_tags() {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -1951,7 +1954,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -2088,7 +2091,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -2175,7 +2178,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
@@ -2187,7 +2190,7 @@ rules:
     // Inspect agent-B's recorded messages for feedback.
     let recorded = provider_b.take_recorded();
     assert!(
-        recorded.len() >= 1,
+        !recorded.is_empty(),
         "agent-B should have at least 1 LLM call"
     );
     let msgs = &recorded[0];
@@ -2268,7 +2271,7 @@ rules:
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(64);
     let session_state = Arc::new(SessionState::default());
 
-    let result = ctx.spawn_task(&td, writer_tx, session_state).await;
+    let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
     let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())

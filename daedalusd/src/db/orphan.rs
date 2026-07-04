@@ -38,13 +38,14 @@ pub fn scan_orphans(conn: &Connection, cutoff: i64) -> Result<Vec<(String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{migrations, pool, registry::*};
+    use crate::db::{migrations, pool};
     use tempfile::TempDir;
 
     fn open_temp() -> (TempDir, Connection) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.sqlite");
-        let conn = pool::open(&path).unwrap();
+        let mut conn = pool::open(&path).unwrap();
+        migrations::run_all(&mut conn).unwrap();
         (dir, conn)
     }
 

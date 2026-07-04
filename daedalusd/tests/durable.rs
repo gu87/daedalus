@@ -5,28 +5,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use daedalusd::agent::permission::{FakePermissionBroker, PermissionBroker};
+use daedalusd::agent::permission::PermissionBroker;
 use daedalusd::agent::r#loop::AgentLoop;
 use daedalusd::config::DaedalusConfig;
 use daedalusd::db::ledger::Ledger;
 use daedalusd::db::{migrations, pool};
 use daedalusd::ipc::reliable::send_reliable_event;
-use daedalusd::tools::registry::ToolRegistry;
-use daedalusd::types::{Message, PermissionDecision, SystemErrorCode, TaskDone, TaskStream};
-
-fn make_config(dir: &tempfile::TempDir, db_path: &std::path::Path) -> DaedalusConfig {
-    let base = dir.path().to_string_lossy().to_string();
-    DaedalusConfig {
-        soul_path: format!("{base}/soul.md"),
-        managed_agents_path: format!("{base}/agents.yaml"),
-        skills_dir: format!("{base}/skills"),
-        models_yaml_path: format!("{base}/models.yaml"),
-        db_path: Some(db_path.to_path_buf()),
-        gate_criteria_path: format!("{base}/gate.yaml"),
-        http_addr: "127.0.0.1:9800".into(),
-        daedalus_md_path: "DAEDALUS.md".into(),
-    }
-}
+use daedalusd::types::{Message, TaskDone};
 
 #[tokio::test]
 async fn append_event_generates_task_scoped_seq() {
@@ -47,6 +32,7 @@ async fn append_event_generates_task_scoped_seq() {
                 req_id: "r1".into(),
                 agent_id: "a1".into(),
                 task_id: "t1".into(),
+                run_id: None,
                 outbox: daedalusd::types::Outbox {
                     schema_version: "2.8".into(),
                     task_id: "t1".into(),
@@ -77,6 +63,7 @@ async fn append_event_generates_task_scoped_seq() {
                 req_id: "r1".into(),
                 agent_id: "a1".into(),
                 task_id: "t1".into(),
+                run_id: None,
                 error_taxonomy: "tool_failure".into(),
                 detail: "boom".into(),
             })
@@ -94,6 +81,7 @@ async fn append_event_generates_task_scoped_seq() {
                 req_id: "r2".into(),
                 agent_id: "a2".into(),
                 task_id: "t2".into(),
+                run_id: None,
                 outbox: daedalusd::types::Outbox {
                     schema_version: "2.8".into(),
                     task_id: "t2".into(),
@@ -135,6 +123,7 @@ async fn append_event_payload_contains_event_id() {
                 req_id: "r1".into(),
                 agent_id: "a1".into(),
                 task_id: "t1".into(),
+                run_id: None,
                 outbox: daedalusd::types::Outbox {
                     schema_version: "2.8".into(),
                     task_id: "t1".into(),
@@ -216,6 +205,7 @@ async fn mark_acked_sets_acked_at() {
                 req_id: "r".into(),
                 agent_id: "a".into(),
                 task_id: "t4".into(),
+                run_id: None,
                 outbox: daedalusd::types::Outbox {
                     schema_version: "2.8".into(),
                     task_id: "t4".into(),
@@ -270,6 +260,7 @@ async fn system_ack_marks_event() {
                 req_id: "r".into(),
                 agent_id: "a".into(),
                 task_id: "t5".into(),
+                run_id: None,
                 outbox: daedalusd::types::Outbox {
                     schema_version: "2.8".into(),
                     task_id: "t5".into(),
@@ -325,6 +316,7 @@ async fn send_reliable_event_via_channel() {
             req_id: "r6".into(),
             agent_id: "a".into(),
             task_id: "t6".into(),
+            run_id: None,
             outbox: daedalusd::types::Outbox {
                 schema_version: "2.8".into(),
                 task_id: "t6".into(),
@@ -388,6 +380,8 @@ fn make_route_ctx(db_path: &std::path::Path) -> Arc<daedalusd::daemon::DaemonCon
             gate_criteria_path: "/dev/null".into(),
             http_addr: "127.0.0.1:9800".into(),
             daedalus_md_path: "DAEDALUS.md".into(),
+            runs_dir: "/tmp/runs".into(),
+            hooks: daedalusd::config::HooksConfig::default(),
         },
         db_path: db_path.to_path_buf(),
         factory: Arc::new(StubFactory),
@@ -422,6 +416,7 @@ async fn system_ack_marks_event_via_control_route() {
                 req_id: "r1".into(),
                 agent_id: "a".into(),
                 task_id: "t1".into(),
+                run_id: None,
                 outbox: daedalusd::types::Outbox {
                     schema_version: "2.8".into(),
                     task_id: "t1".into(),
@@ -581,7 +576,7 @@ async fn session_rejoin_without_last_event_id_replays_all() {
     control::route(&ctx, &state, &rejoin_json, &tx).await;
 
     for i in 0..3 {
-        let msg = rx.try_recv().expect(&format!("seq {i}"));
+        let msg = rx.try_recv().unwrap_or_else(|_| panic!("seq {i}"));
         if let Message::TaskStream(ts) = msg {
             assert_eq!(ts.event_id.as_deref(), Some(format!("t6:{i}").as_str()));
         } else {

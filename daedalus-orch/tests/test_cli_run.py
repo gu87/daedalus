@@ -14,9 +14,9 @@ from daedalus.orch.task_card import build_task_card
 # ── task_card unit tests ──────────────────────────────────────────────
 
 def test_task_card_ids_consistent():
-    task_id, tc = build_task_card("test", "daedalus-desktop")
+    task_id, tc = build_task_card("test", "default-worker")
     assert task_id == tc["task_card_id"]
-    assert tc["execution_plan"]["primary_agent"] == "daedalus-desktop"
+    assert tc["execution_plan"]["primary_agent"] == "default-worker"
     assert tc["schema_version"] == "2.8"
     assert tc["allowed_files"] == []
     assert tc["safety"]["allowed_paths"] == []
@@ -146,7 +146,7 @@ def test_permission_non_tty_auto_denied():
 def test_arg_defaults():
     result = _run_cli("run", "--help")
     assert result.returncode == 0
-    assert "daedalus-desktop" in result.stdout
+    assert "default-worker" in result.stdout
 
 
 def test_arg_empty_goal_rejected():
@@ -295,7 +295,7 @@ def test_run_permission_tty_approved_flow():
         with mock.patch("sys.stdin.isatty", return_value=True), \
              mock.patch("builtins.input", return_value="y"):
             args = ap.Namespace(
-                goal="test", agent="daedalus-desktop",
+                goal="test", agent="default-worker",
                 socket=sock_path, timeout=30.0,
             )
             old_stdout = sys.stdout

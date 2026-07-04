@@ -5,7 +5,7 @@
 ## 项目概述
 
 - 项目名：Daedalus — Agent OS
-- 技术栈：Rust (daedalusd) + Python (daedalus-orch) + Electron/React (daedalus-desktop)
+- 技术栈：Rust (daedalusd) + Python (daedalus-orch) +
 - 通信协议：NDJSON over Unix Domain Socket (daedalusd ↔ daedalus-orch)
 
 ## 工作原则
@@ -20,4 +20,3 @@
 - 不修改 IPC 协议除非当前子任务明确要求
 - 不修改 SQLite schema 除非当前子任务明确要求
 - 不实现 UI / HTTP / system.ack / event replay 除非 PLANS.md 要求
-- 不改 desktop-demo/

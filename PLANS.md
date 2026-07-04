@@ -1561,7 +1561,7 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
   │
   └─→ P4.2  Task 可观测性 API [DONE] (36f688b, fixup 60703ce)
         │
-        └─→ P4.3  daedalus-desktop Electron React UI Skeleton 收口 [DONE] ★ UI 介入点
+        └─→ P4.3  (frontend removed) Electron React UI Skeleton 收口 [DONE] ★ UI 介入点
               │     (6dc9cd4, 75d7df6, a21b0df)
               │
               └─→ P4.4  配置诊断 + 模型摘要 API [DONE] (168eb23)
@@ -1617,17 +1617,17 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 
 **不实现**：任务取消/重试、分页、WebSocket、统计聚合、outbox_json 返回
 
-## P4.3 daedalus-desktop Electron React UI Skeleton 收口 [DONE]
+## P4.3 (frontend removed) Electron React UI Skeleton 收口 [DONE]
 
 > commits: 6dc9cd4, 75d7df6, a21b0df
 
 **修订原因**：
 - 原计划：daedalusd serving 单 HTML 仪表盘（`http/dashboard.rs` + `assets/dashboard.html`）
 - UI Skeleton 合并后，前端形态升级为 Electron + React + TypeScript 桌面项目
-- 修订后：`daedalus-desktop/` 成为 Phase 4+ 前端唯一载体，不再单独实现 cc-haha 单 HTML 仪表盘
+- 修订后：`(frontend removed)/` 成为 Phase 4+ 前端唯一载体，不再单独实现 cc-haha 单 HTML 仪表盘
 
 **核心交付**：
-- `daedalus-desktop/` 独立 Electron + Vite + React 19 + TypeScript 项目（31 个文件）
+- `(frontend removed)/` 独立 Electron + Vite + React 19 + TypeScript 项目（31 个文件）
 - 左中右三栏布局：左侧展开/折叠、中间工作 Tab、右侧工具 Tab
 - 三种核心视图：对话 / 多 Agent 会议 / 任务执行 + Gate 审批
 - `electron/main.js` 最小 Electron 主进程壳
@@ -1635,7 +1635,7 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 - `src/services/daedalusApi.ts` 预留 IPC 接入层（后续真实 IPC 只从这里改）
 
 **验证**：
-- `cd daedalus-desktop && npm run build` ✅ tsc + vite（43 modules, ~660ms）
+- `cd (frontend removed) && npm run build` ✅ tsc + vite（43 modules, ~660ms）
 - `npm run dev` ✅ Vite → 127.0.0.1:5173
 - mock UI，不接真实 daedalusd
 
@@ -1644,7 +1644,7 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 - 不引入 Redux / Zustand（只用 React state）
 - 不重新设计 UI
 - 不改 Rust/Python 后端
-- 不删除 desktop-demo/
+- 不删除 (demo removed)/
 - 不删除会议模式 / Gate 审批条
 
 ## P4.4 配置诊断 + 模型摘要 API [DONE]
@@ -1699,7 +1699,7 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 - `GET /api/tasks/:run_id` — 任务详情
 - `GET /api/config/models` — 模型摘要（无敏感字段）
 - `POST /api/models/validate` — 模型连通性探测（Router 生产路径）
-- `daedalus-desktop/` — Electron React UI Skeleton（mock 数据）
+- `(frontend removed)/` — Electron React UI Skeleton（mock 数据）
 - `scripts/smoke-phase4.sh` — 全链路验收（Python mock + curl）
 
 **最终验证**：
@@ -1707,13 +1707,13 @@ P4.1  HTTP API 骨架 + 健康检查 [DONE] (5112720, fixup 7f922cb)
 - `cargo test --workspace` ✅ 415 passed, 0 failed, 1 skipped
 - `cargo clippy --workspace -- -D warnings` ✅
 - `scripts/smoke-phase4.sh` ✅ ALL PASSED
-- `cd daedalus-desktop && npm run build` ✅
+- `cd (frontend removed) && npm run build` ✅
 
 **返修点**（a877ac7）：
 - smoke 动态端口（python3 socket bind(0)），避免固定端口冲突
 - PID 初始化 + cleanup `-n` guard，`set -u` 安全
 
-**不做**：Router 热替换、notify watcher、IPC/schema/Gate 修改、认证/HTTPS、凭证热刷新、Gemini/Cohere、daedalus-desktop 真实 IPC、system.ack/pipeline/Omega
+**不做**：Router 热替换、notify watcher、IPC/schema/Gate 修改、认证/HTTPS、凭证热刷新、Gemini/Cohere、(frontend removed) 真实 IPC、system.ack/pipeline/Omega
 
 ---
 

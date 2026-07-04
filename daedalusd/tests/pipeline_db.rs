@@ -102,12 +102,15 @@ fn get_task_invalid_db_status_returns_error() {
     db::insert_task(&conn, "task-bad", None, t).unwrap();
 
     // Bypass the CHECK constraint to write bogus status.
-    conn.execute_batch("PRAGMA ignore_check_constraints = ON;").unwrap();
+    conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
     conn.execute(
         "UPDATE tasks SET status = 'bogus' WHERE task_id = 'task-bad'",
         [],
-    ).unwrap();
-    conn.execute_batch("PRAGMA ignore_check_constraints = OFF;").unwrap();
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA ignore_check_constraints = OFF;")
+        .unwrap();
 
     let err = db::get_task(&conn, "task-bad").unwrap_err();
     assert!(

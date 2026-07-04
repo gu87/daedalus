@@ -244,6 +244,8 @@ pub struct TaskDone {
     pub req_id: String,
     pub agent_id: String,
     pub task_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub outbox: Outbox,
 }
 
@@ -255,6 +257,8 @@ pub struct TaskError {
     pub req_id: String,
     pub agent_id: String,
     pub task_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub error_taxonomy: String,
     pub detail: String,
 }

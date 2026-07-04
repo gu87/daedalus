@@ -62,6 +62,8 @@ fn test_config(dir: &tempfile::TempDir) -> DaedalusConfig {
         gate_criteria_path: format!("{base}/gate-criteria.yaml"),
         http_addr: "127.0.0.1:9800".into(),
         daedalus_md_path: "DAEDALUS.md".into(),
+        runs_dir: "/tmp/runs".into(),
+        hooks: daedalusd::config::HooksConfig::default(),
     }
 }
 
@@ -255,6 +257,7 @@ fn build_loop(
 
     AgentLoop::with_components(
         "test-agent".into(),
+        "ask_user".into(),
         router,
         strategy,
         prompt_builder,
@@ -573,6 +576,7 @@ async fn scenario_7_cancel() {
         let prompt_builder = build_prompt_builder(&dir);
         AgentLoop::with_components(
             "test-agent".into(),
+            "ask_user".into(),
             router,
             strategy,
             prompt_builder,
@@ -1008,6 +1012,7 @@ async fn scenario_18_lifecycle_cancel_writes_cancelled() {
         let prompt_builder = build_prompt_builder(&dir);
         AgentLoop::with_components(
             "test-agent".into(),
+            "ask_user".into(),
             router,
             strategy,
             prompt_builder,
@@ -1216,11 +1221,7 @@ async fn scenario_21_denied_does_not_truncate_pending_tool_calls() {
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 
     // Verify both tool messages are present in the conversation.
-    let tool_msgs: Vec<_> = ag
-        .messages()
-        .iter()
-        .filter(|m| m.role == "tool")
-        .collect();
+    let tool_msgs: Vec<_> = ag.messages().iter().filter(|m| m.role == "tool").collect();
     assert_eq!(
         tool_msgs.len(),
         2,

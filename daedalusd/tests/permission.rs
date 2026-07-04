@@ -139,9 +139,10 @@ async fn ipc_broker_approved_via_response() {
     };
 
     // Inject the matching response (simulating control::route).
-    let mut map = state.pending_permissions.lock().unwrap();
-    let pending = map.remove(&perm_id).expect("must be pending");
-    drop(map);
+    let pending = {
+        let mut map = state.pending_permissions.lock().unwrap();
+        map.remove(&perm_id).expect("must be pending")
+    };
     let _ = pending.sender.send(PermissionDecision::Approved);
 
     let result = handle.await.unwrap().unwrap();
@@ -178,9 +179,10 @@ async fn ipc_broker_denied_via_response() {
         _ => panic!("expected PermissionRequest"),
     };
 
-    let mut map = state.pending_permissions.lock().unwrap();
-    let pending = map.remove(&perm_id).expect("must be pending");
-    drop(map);
+    let pending = {
+        let mut map = state.pending_permissions.lock().unwrap();
+        map.remove(&perm_id).expect("must be pending")
+    };
     let _ = pending.sender.send(PermissionDecision::Denied);
 
     let result = handle.await.unwrap().unwrap();
@@ -314,9 +316,10 @@ async fn no_pending_leak_after_response() {
     }
 
     // Send response via control::route style.
-    let mut map = state.pending_permissions.lock().unwrap();
-    let pending = map.remove(&perm_id).unwrap();
-    drop(map);
+    let pending = {
+        let mut map = state.pending_permissions.lock().unwrap();
+        map.remove(&perm_id).unwrap()
+    };
     let _ = pending.sender.send(PermissionDecision::Approved);
 
     handle.await.unwrap().unwrap();

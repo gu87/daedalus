@@ -523,7 +523,7 @@ models:
     fn parse_config(yaml: &str) -> ModelsConfig {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(yaml.as_bytes()).unwrap();
-        load_models_yaml(&f.path().to_string_lossy().to_string()).unwrap()
+        load_models_yaml(f.path().to_string_lossy().as_ref()).unwrap()
     }
 
     fn strategy(primary: &str) -> ModelStrategy {

@@ -78,12 +78,21 @@ async fn writer_loop(
     mut rx: mpsc::Receiver<Message>,
     state: &SessionState,
 ) {
-    while let Some(msg) = rx.recv().await {
-        if let Ok(mut json) = protocol::serialize_message(&msg) {
-            json.push('\n');
-            if writer.write_all(json.as_bytes()).await.is_err() {
-                state.shutdown.cancel();
-                session::drain_pending(state);
+    loop {
+        tokio::select! {
+            biased;
+            maybe_msg = rx.recv() => {
+                let Some(msg) = maybe_msg else { break; };
+                if let Ok(mut json) = protocol::serialize_message(&msg) {
+                    json.push('\n');
+                    if writer.write_all(json.as_bytes()).await.is_err() {
+                        state.shutdown.cancel();
+                        session::drain_pending(state);
+                        break;
+                    }
+                }
+            }
+            _ = state.shutdown.cancelled() => {
                 break;
             }
         }

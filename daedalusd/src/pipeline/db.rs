@@ -79,10 +79,7 @@ pub fn get_task(
         Some(row) => {
             let raw = row.map_err(map_db_err)?;
             let status = TaskStatus::parse_status(&raw.status_str).ok_or_else(|| {
-                DaedalusError::Protocol(format!(
-                    "invalid task status in DB: {}",
-                    raw.status_str
-                ))
+                DaedalusError::Protocol(format!("invalid task status in DB: {}", raw.status_str))
             })?;
             Ok(Some(TaskRow {
                 id: raw.id,
@@ -123,8 +120,7 @@ pub fn update_status(
     };
 
     // Validate transition.
-    TaskStatus::transition(&current, &next)
-        .map_err(DaedalusError::Protocol)?;
+    TaskStatus::transition(&current, &next).map_err(DaedalusError::Protocol)?;
 
     // Apply.
     conn.execute(

@@ -149,7 +149,7 @@ pub async fn route(
                     // P2.7: delegate to DaemonContext.
                     let writer_tx = writer_tx.clone();
                     let session_state = Arc::clone(state);
-                    ctx.spawn_task(td, writer_tx, session_state).await
+                    ctx.spawn_task(td, writer_tx, session_state, None).await
                 }
                 Message::TaskStream(_)
                 | Message::TaskDone(_)
@@ -200,6 +200,8 @@ mod tests {
                 gate_criteria_path: "/dev/null".into(),
                 http_addr: "127.0.0.1:9800".into(),
                 daedalus_md_path: "DAEDALUS.md".into(),
+                runs_dir: "/tmp/runs".into(),
+                hooks: crate::config::HooksConfig::default(),
             },
             db_path: std::path::PathBuf::from("/dev/null"),
             factory: Arc::new(StubFactory),
@@ -339,6 +341,8 @@ mod tests {
                 gate_criteria_path: "/dev/null".into(),
                 http_addr: "127.0.0.1:9800".into(),
                 daedalus_md_path: "DAEDALUS.md".into(),
+                runs_dir: "/tmp/runs".into(),
+                hooks: crate::config::HooksConfig::default(),
             },
             db_path: std::path::PathBuf::from("/dev/null"),
             factory: Arc::new(ErrFactory),

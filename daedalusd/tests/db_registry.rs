@@ -368,6 +368,7 @@ fn touch_heartbeat_updates_timestamp() {
 
 // ── P3.1b: list_recent_runs tests ────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn seed_run_with_outbox(
     conn: &Connection,
     run_id: &str,
@@ -624,7 +625,7 @@ fn list_recent_runs_summary_truncated_unicode() {
     let (_dir, mut conn) = open_temp();
     migrations::run_all(&mut conn).unwrap();
     // 130-char chinese summary — should be truncated to 120 chars.
-    let long_cn: String = std::iter::repeat('中').take(130).collect();
+    let long_cn = "中".repeat(130);
     let ob = format!(r#"{{"summary":"{}"}}"#, long_cn);
     seed_run_with_outbox(
         &conn,
