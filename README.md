@@ -1,5 +1,7 @@
 # Daedalus — Agent Runtime
 
+Daedalus 是一个跑在你自己电脑上的 AI 任务执行器。你可以把它理解成“本地 Agent 后台”：ChatGPT、飞书 Bot、CLI 或其他工具把任务交给它，它负责在本机项目里调用模型、读写文件、执行命令、记录状态，并把结果结构化返回。它不追求做一个完整聊天应用，而是专注做一件事：把外部入口发来的任务，安全、可追踪地在本地跑完。
+
 一个用 Rust 从零实现的本地 Agent 运行时。包含 9 状态 Agent Loop、NDJSON over UDS IPC、SQLite 持久化、Gate 错误路由、HTTP API。
 
 > **项目状态：已完成，不再活跃开发。**
