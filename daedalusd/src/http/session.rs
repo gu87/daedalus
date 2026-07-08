@@ -46,10 +46,16 @@ pub(crate) struct SessionStateResponse {
     npc_id: String,
     case_id: String,
     confession_stage: String,
+    emotional_state: String,
+    turn_count: usize,
+    unlocked_clues: Vec<String>,
     game_state: Value,
     messages: Vec<Value>,
     events: Vec<GameEventResponse>,
     is_processing: bool,
+    is_ended: bool,
+    created_at: i64,
+    updated_at: i64,
 }
 
 #[derive(Serialize)]
@@ -288,7 +294,7 @@ pub(crate) async fn get_session_state(
         let row = conn
             .query_row(
                 "SELECT session_id, npc_id, case_id, confession_stage, game_state_json,
-                        messages_jsonl, is_processing
+                        messages_jsonl, is_processing, created_at, updated_at
                  FROM sessions WHERE session_id = ?1",
                 params![session_id],
                 |row| {
@@ -300,6 +306,8 @@ pub(crate) async fn get_session_state(
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
                     ))
                 },
             )
@@ -314,23 +322,36 @@ pub(crate) async fn get_session_state(
             game_state_json,
             messages_jsonl,
             is_processing,
+            created_at,
+            updated_at,
         )) = row
         else {
             return Err(SessionError::NotFound(format!(
                 "session not found: {session_id}"
             )));
         };
+        let messages = parse_jsonl(&messages_jsonl)?;
         let events = load_game_events(&conn, &session_id)?;
+        let turn_count = derive_turn_count(&messages);
+        let emotional_state = derive_emotional_state(&messages);
+        let unlocked_clues = derive_unlocked_clues(&events);
+        let is_ended = derive_is_ended(&events);
 
         Ok::<SessionStateResponse, SessionError>(SessionStateResponse {
             session_id,
             npc_id,
             case_id,
             confession_stage,
+            emotional_state,
+            turn_count,
+            unlocked_clues,
             game_state: serde_json::from_str(&game_state_json).map_err(internal)?,
-            messages: parse_jsonl(&messages_jsonl)?,
+            messages,
             events,
             is_processing: is_processing != 0,
+            is_ended,
+            created_at,
+            updated_at,
         })
     })
     .await
@@ -355,6 +376,50 @@ fn parse_jsonl(lines: &str) -> Result<Vec<Value>, SessionError> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).map_err(internal))
         .collect()
+}
+
+fn derive_turn_count(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("npc"))
+        .count()
+}
+
+fn derive_emotional_state(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("npc"))
+        .and_then(|message| message.get("emotion").and_then(Value::as_str))
+        .unwrap_or("calm")
+        .to_string()
+}
+
+fn derive_unlocked_clues(events: &[GameEventResponse]) -> Vec<String> {
+    let mut clues = Vec::new();
+
+    for event in events {
+        if event.event_type != "clue_unlocked" {
+            continue;
+        }
+
+        if let Some(clue_id) = event.payload.get("clue_id").and_then(Value::as_str) {
+            clues.push(clue_id.to_string());
+        }
+        if let Some(clue_ids) = event.payload.get("clue_ids").and_then(Value::as_array) {
+            for clue_id in clue_ids {
+                if let Some(clue_id) = clue_id.as_str() {
+                    clues.push(clue_id.to_string());
+                }
+            }
+        }
+    }
+
+    clues
+}
+
+fn derive_is_ended(events: &[GameEventResponse]) -> bool {
+    events.iter().any(|event| event.event_type == "session_end")
 }
 
 fn insert_game_event(

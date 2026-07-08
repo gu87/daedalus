@@ -108,6 +108,12 @@ async fn start_session_returns_session_id() {
     assert_eq!(events[0]["event_type"], "session_start");
     assert_eq!(events[0]["payload"]["npc_id"], "zhang_san");
     assert_eq!(events[0]["payload"]["case_id"], "wujing_fenhen");
+    assert_eq!(state["emotional_state"], "calm");
+    assert_eq!(state["turn_count"], 0);
+    assert!(state["unlocked_clues"].as_array().unwrap().is_empty());
+    assert_eq!(state["is_ended"], false);
+    assert!(state["created_at"].as_i64().is_some());
+    assert!(state["updated_at"].as_i64().is_some());
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -150,6 +156,12 @@ async fn message_appends_history_and_state_reads_back() {
     let state: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(state["session_id"], session_id);
     assert_eq!(state["case_id"], "wujing_fenhen");
+    assert_eq!(state["emotional_state"], "defensive");
+    assert_eq!(state["turn_count"], 1);
+    assert!(state["unlocked_clues"].as_array().unwrap().is_empty());
+    assert_eq!(state["is_ended"], false);
+    assert!(state["created_at"].as_i64().is_some());
+    assert!(state["updated_at"].as_i64().is_some());
     assert_eq!(state["messages"].as_array().unwrap().len(), 2);
     assert_eq!(state["events"].as_array().unwrap().len(), 3);
     assert_eq!(state["events"][1]["event_type"], "player_message");
