@@ -11,6 +11,7 @@
 
 pub mod file_read;
 pub mod file_write;
+pub mod narrative;
 pub mod registry;
 pub mod task_done;
 pub mod terminal;

@@ -47,6 +47,26 @@ pub struct DefaultAgentLoopFactory {
     pub config: DaedalusConfig,
 }
 
+pub fn build_default_tool_registry() -> Result<ToolRegistry, DaedalusError> {
+    let mut registry = ToolRegistry::new();
+    for tool in [
+        Arc::new(crate::tools::file_read::FileReadTool) as Arc<dyn crate::tools::Tool>,
+        Arc::new(crate::tools::file_write::FileWriteTool),
+        Arc::new(crate::tools::terminal::TerminalTool),
+        Arc::new(crate::tools::task_done::TaskDoneTool),
+    ] {
+        registry
+            .register(tool)
+            .map_err(|e| DaedalusError::Protocol(format!("tool registry error: {e}")))?;
+    }
+    for tool in crate::tools::narrative::tools() {
+        registry
+            .register(tool)
+            .map_err(|e| DaedalusError::Protocol(format!("tool registry error: {e}")))?;
+    }
+    Ok(registry)
+}
+
 impl AgentLoopFactory for DefaultAgentLoopFactory {
     fn build(
         &self,
@@ -54,17 +74,7 @@ impl AgentLoopFactory for DefaultAgentLoopFactory {
         perm_broker: Arc<dyn PermissionBroker>,
         cancel: CancellationToken,
     ) -> Result<AgentLoop, DaedalusError> {
-        let mut r = ToolRegistry::new();
-        for tool in [
-            Arc::new(crate::tools::file_read::FileReadTool) as Arc<dyn crate::tools::Tool>,
-            Arc::new(crate::tools::file_write::FileWriteTool),
-            Arc::new(crate::tools::terminal::TerminalTool),
-            Arc::new(crate::tools::task_done::TaskDoneTool),
-        ] {
-            r.register(tool)
-                .map_err(|e| DaedalusError::Protocol(format!("tool registry error: {e}")))?;
-        }
-        let tool_registry = Arc::new(r);
+        let tool_registry = Arc::new(build_default_tool_registry()?);
         AgentLoop::new(
             agent_id,
             self.config.clone(),
