@@ -1,103 +1,155 @@
-# 当前任务：DevSpace 增加 Daedalus 专用 MCP 工具
+# 当前任务：Narrative Backend Phase 1 - 最小审讯 Session API
 
 > standard 模式：总控分派；developer 实现；reviewer 验收。  
-> 目标是让 ChatGPT 通过 DevSpace 调用本机 Daedalus runtime，而不是让 ChatGPT 直接用 `bash curl`。
+> 总控不写业务代码。developer 只做本任务最小实现；reviewer 只做只读验收。
 
 ## 背景
 
-DevSpace 已经打通 ChatGPT MCP：
+Daedalus 后续作为《雾井焚痕》AI Narrative Runtime 的后端底座。当前分支：
 
-- MCP URL：`https://devspace.sevengu.top/mcp`
-- DevSpace 版本：`1.0.3`
-- 当前已暴露工具：`bash`、`edit`、`open_workspace`、`read`、`write`
-- ChatGPT 已能打开 Obsidian vault 并做只读 Markdown 搜索
-- DevSpace allowedRoots 已包含 `/Users/gu/Daedalus`
+```text
+/Users/gu/Daedalus
+branch: codex/narrative-backend
+```
 
-Daedalus 当前已有 runtime HTTP API：
+游戏 Demo、剧本、素材、Godot 仍在另一个仓库，不在本任务中修改：
 
-- `POST http://127.0.0.1:9800/api/tasks`
-- `GET http://127.0.0.1:9800/api/tasks/:run_id/wait`
-- 返回 `outbox_json`
+```text
+/Users/gu/daedalus-courtroom-demo
+branch: main
+```
+
+本轮只做后端最小闭环，不接 Godot，不做 SSE，不做完整角色知识系统。
 
 ## 目标
 
-在 DevSpace 中新增一个窄 MCP tool：
+实现最小审讯 session 后端：
 
 ```text
-daedalus_run
+POST /api/session/start
+POST /api/session/:session_id/message
+GET  /api/session/:session_id/state
 ```
 
-ChatGPT 调用该工具时，DevSpace 内部执行：
+第一版 `/message` 返回阻塞 JSON。可以先用确定性假 NPC 回复跑通 DB/API/session 状态；如复用现有 Agent Loop 成本过高，本轮不强求接 LLM。
 
-1. `POST http://127.0.0.1:9800/api/tasks`
-2. 获取 `run_id`
-3. `GET http://127.0.0.1:9800/api/tasks/{run_id}/wait`
-4. 返回 `run_id`、`status`、`outbox_json`
+## 范围
 
-## 边界
+允许修改：
 
-只新增独立工具，不改变现有 DevSpace 文件工具。
+- `daedalusd/src/db/migrations.rs`
+- `daedalusd/src/http/server.rs`
+- `daedalusd/src/http/mod.rs`
+- `daedalusd/src/http/session.rs`
+- `daedalusd/src/session/mod.rs`
+- `daedalusd/src/lib.rs`
+- 相关最小测试文件
 
-不要动：
+不做：
 
-- `bash`
-- `edit`
-- `open_workspace`
-- `read`
-- `write`
-- DevSpace allowedRoots
-- OAuth / auth.json
-- Cloudflare tunnel 配置
-- Daedalus 代码
+- 不改 Agent Loop 9 状态机
+- 不接 SSE
+- 不接 Godot
+- 不做多 NPC
+- 不做 CharacterKnowledgeProvider
+- 不做 5 个游戏 Tool
+- 不做 Gate AutoRevision 集成
+- 不改 `/Users/gu/daedalus-courtroom-demo`
 
-不要做：
+## 数据模型
 
-- 不把 Daedalus 合进 DevSpace 主启动流程
-- 不让 DevSpace 启动强依赖 Daedalus
-- 不暴露任意 URL 转发工具
-- 不扩大本机 shell 权限
+新增最小 `sessions` 表，字段以能支撑本轮验收为准：
 
-## 工具接口建议
+```text
+session_id
+npc_id
+case_id
+confession_stage
+game_state_json
+messages_jsonl
+is_processing
+created_at
+updated_at
+```
 
-输入：
+`messages_jsonl` append-only，每行一条 JSON。
+
+## API 契约
+
+### POST /api/session/start
+
+输入示例：
 
 ```json
 {
-  "agent_id": "default-worker",
-  "goal": "echo hello",
-  "context": "可选上下文",
-  "timeout_seconds": 300
+  "npc_id": "zhang_san",
+  "scene_id": "police_office",
+  "game_state": {
+    "case_id": "wujing_fenhen",
+    "unlocked_evidence_ids": [],
+    "player_reputation": 50,
+    "time_pressure": 0.3
+  },
+  "initial_confession_stage": "denial"
 }
 ```
 
-行为：
-
-- `agent_id` 默认 `default-worker`
-- `timeout_seconds` 默认 300
-- Daedalus 不在线时，返回清晰错误：`Daedalus daemon unavailable`
-- 不让 DevSpace 进程崩溃
-- 返回尽量短：
+返回 `201`，包含：
 
 ```json
 {
-  "run_id": "run-...",
-  "status": "done",
-  "outbox_json": "..."
+  "session_id": "sess-...",
+  "npc_id": "zhang_san",
+  "confession_stage": "denial"
 }
 ```
+
+### POST /api/session/:session_id/message
+
+输入示例：
+
+```json
+{
+  "player_text": "你认识梁远山吗？",
+  "evidence_id": null,
+  "pressure_level": "normal"
+}
+```
+
+返回 `200`，包含最小 NPC 输出：
+
+```json
+{
+  "session_id": "sess-...",
+  "npc_id": "zhang_san",
+  "utterance": "我不知道你在说什么。",
+  "emotion": "defensive",
+  "confession_stage": "denial",
+  "revealed_clues": []
+}
+```
+
+同一 session 正在处理时，应返回 `409 Conflict`。
+
+### GET /api/session/:session_id/state
+
+返回当前 session 状态和 message history。
 
 ## 验收标准
 
-- [ ] DevSpace 原有工具列表仍包含 `bash/edit/open_workspace/read/write`
-- [ ] 新增 `daedalus_run`
-- [ ] Daedalus 不在线时，调用 `daedalus_run` 返回清晰错误，不影响其他工具
-- [ ] Daedalus 在线时，`daedalus_run` 能提交 task 并等待结果
-- [ ] 不修改 DevSpace allowedRoots / OAuth / Cloudflare 配置
-- [ ] 不修改 Daedalus 代码
-- [ ] 有最小验证记录
+- [ ] `cargo fmt --all -- --check` 通过
+- [ ] `cargo test -p daedalusd session` 或同等 targeted session/http_session 测试通过
+- [ ] `cargo test -p daedalusd --test http_tasks` 仍通过，确认旧 task API 不被破坏
+- [ ] `POST /api/session/start` 有测试覆盖，能返回有效 session_id
+- [ ] `POST /api/session/:session_id/message` 有测试覆盖，能追加 player/npc message 并返回 utterance JSON
+- [ ] `GET /api/session/:session_id/state` 有测试覆盖，能读回 session 和 history
+- [ ] 同一 session 并发/processing 状态有最小测试或明确实现，返回 409
+- [ ] 未修改 `/Users/gu/daedalus-courtroom-demo`
+- [ ] developer 完成后追加结论到 `work/callbacks.md`
+- [ ] reviewer 只读复核后追加 PASS/FAIL 到 `work/callbacks.md`
 
 ## 当前分工
 
-- 总控：控范围、分派、读取开发/验收回报。
-- developer：定位 DevSpace 源码/安装目录，做最小实现，验证工具注册和错误路径。
-- reviewer：只读验收，确认旧功能不受影响、新工具可见、错误路径安全。
+- 总控：只协调、分派、汇总；不写代码。
+- developer：做最小实现和最小有效验证。
+- reviewer：基于本任务验收标准只读验收，输出 PASS/FAIL。
