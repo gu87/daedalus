@@ -83,3 +83,5 @@
 [2026-07-08 CST] [总控] 任务分派 - 已向 developer 线程 019f3f9c-2d57-72b1-93db-e832db3de66d 分派 `work/task.md` 的最小审讯 Session API 实现任务；已通知 reviewer 线程 019f3f9c-382a-7833-b71e-e47463b05b8b 待读取验收标准并 standby，等待 developer 完成后再正式验收。
 
 [2026-07-08 11:06 +0800] [总控] 新任务准备 - 已将 `work/task.md` 更新为 Narrative Backend Phase 1b：新增 `game_events` 事件日志，要求现有 Session API 写入并读回事实事件；明确排除 Tool / SSE / Godot / CharacterKnowledgeProvider / Agent Loop 改造。`work/test-report.md` 已重置为等待 developer 实现。
+
+[2026-07-08 11:27 +0800] [总控] 新任务准备 - 已将 `work/task.md` 更新为 Narrative Backend Phase 1c：补齐 `GET /api/session/:session_id/state` 的游戏侧状态契约，从现有 messages/events 推导 `emotional_state`、`turn_count`、`unlocked_clues`、`is_ended`，并返回 `created_at` / `updated_at`；明确本轮不改数据库迁移或表结构，不接 Tool / SSE / Godot / CharacterKnowledgeProvider / Agent Loop。
