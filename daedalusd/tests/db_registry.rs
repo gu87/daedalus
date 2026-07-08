@@ -35,14 +35,14 @@ fn migration_run_twice_is_idempotent() {
     let v1: i32 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v1, 3);
+    assert_eq!(v1, 4);
 
     // Second call must succeed and not change the version.
     migrations::run_all(&mut conn).unwrap();
     let v2: i32 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v2, 3);
+    assert_eq!(v2, 4);
 }
 
 // ── migration rollback ──────────────────────────────────────────────
@@ -80,7 +80,7 @@ fn migration_failure_rolls_back() {
     let v: i32 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 4);
 }
 
 // ── schema verification ─────────────────────────────────────────────

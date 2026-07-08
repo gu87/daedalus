@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::config;
 use super::health::{self, HttpState};
+use super::session;
 use super::tasks;
 use super::validate;
 
@@ -26,6 +27,15 @@ pub fn make_router(state: Arc<HttpState>) -> axum::Router {
         .route("/api/tasks", post(tasks::create_task))
         .route("/api/tasks/:run_id/wait", get(tasks::wait_task))
         .route("/api/tasks/:run_id", get(tasks::get_task))
+        .route("/api/session/start", post(session::start_session))
+        .route(
+            "/api/session/:session_id/message",
+            post(session::message_session),
+        )
+        .route(
+            "/api/session/:session_id/state",
+            get(session::get_session_state),
+        )
         .route("/api/config/models", get(config::list_models))
         .route("/api/models/validate", post(validate::validate_model))
         .with_state(state)
@@ -40,6 +50,15 @@ pub async fn run_http(listener: TcpListener, state: Arc<HttpState>, shutdown: Ca
         .route("/api/tasks", post(tasks::create_task))
         .route("/api/tasks/:run_id/wait", get(tasks::wait_task))
         .route("/api/tasks/:run_id", get(tasks::get_task))
+        .route("/api/session/start", post(session::start_session))
+        .route(
+            "/api/session/:session_id/message",
+            post(session::message_session),
+        )
+        .route(
+            "/api/session/:session_id/state",
+            get(session::get_session_state),
+        )
         .route("/api/config/models", get(config::list_models))
         .route("/api/models/validate", post(validate::validate_model))
         .with_state(state);

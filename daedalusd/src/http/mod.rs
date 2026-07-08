@@ -5,5 +5,6 @@
 pub mod config;
 pub mod health;
 pub mod server;
+pub mod session;
 pub mod tasks;
 pub mod validate;

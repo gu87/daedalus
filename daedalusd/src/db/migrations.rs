@@ -77,6 +77,22 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 ",
     },
+    Migration {
+        version: 4,
+        sql: "\
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id        TEXT PRIMARY KEY,
+    npc_id            TEXT NOT NULL,
+    case_id           TEXT NOT NULL,
+    confession_stage  TEXT NOT NULL,
+    game_state_json   TEXT NOT NULL,
+    messages_jsonl    TEXT NOT NULL DEFAULT '',
+    is_processing     INTEGER NOT NULL DEFAULT 0 CHECK(is_processing IN (0, 1)),
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);
+",
+    },
 ];
 
 /// Apply every pending migration.  Each migration runs inside a
@@ -132,7 +148,10 @@ mod tests {
         let v1: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(v1, 3, "user_version should be 3 after first run (v1+v2+v3)");
+        assert_eq!(
+            v1, 4,
+            "user_version should be 4 after first run (v1+v2+v3+v4)"
+        );
 
         // Verify tasks table and index exist.
         let tasks_exists: bool = conn
@@ -149,13 +168,22 @@ mod tests {
             .exists([])
             .unwrap();
         assert!(idx_exists, "idx_tasks_status must exist after v3 migration");
+        let sessions_exists: bool = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(
+            sessions_exists,
+            "sessions table must exist after v4 migration"
+        );
 
         // Second run — should be a no-op.
         run_all(&mut conn).unwrap();
         let v2: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 3, "user_version should still be 3 after second run");
+        assert_eq!(v2, 4, "user_version should still be 4 after second run");
     }
 
     #[test]
@@ -205,8 +233,8 @@ NOT VALID SQL AT ALL;
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(
-            v, 3,
-            "real migration must succeed after bogus rollback (v1+v2+v3)"
+            v, 4,
+            "real migration must succeed after bogus rollback (v1+v2+v3+v4)"
         );
     }
 }
