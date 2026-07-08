@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{fs, path::Path, sync::Arc};
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::types::{RiskLevel, ToolDef, ToolResult};
@@ -14,6 +15,29 @@ pub struct CheckKnowledgeTool;
 pub struct LogInterrogationEventTool;
 
 const CONFESSION_STAGES: &[&str] = &["denial", "vague", "partial", "breakdown"];
+
+#[derive(Deserialize)]
+struct KnowledgeFile {
+    npc_id: String,
+    #[allow(dead_code)]
+    case_id: Option<String>,
+    #[serde(default)]
+    knows: Vec<KnownFact>,
+    #[serde(default)]
+    hides: Vec<HiddenFact>,
+}
+
+#[derive(Deserialize)]
+struct KnownFact {
+    fact_id: String,
+    unlock_condition: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HiddenFact {
+    fact_id: String,
+    reveal_stage: Option<String>,
+}
 
 pub fn tools() -> Vec<Arc<dyn Tool>> {
     vec![
@@ -66,33 +90,85 @@ fn confession_stage_rank(stage: &str) -> Option<usize> {
         .position(|candidate| candidate == &stage)
 }
 
+fn knowledge_file_path(work_dir: &Path, npc_id: &str) -> std::path::PathBuf {
+    work_dir
+        .join("narrative")
+        .join("characters")
+        .join(npc_id)
+        .join("knowledge.yaml")
+}
+
+fn required_stage_rank(
+    stage: Option<&str>,
+    default_stage: &str,
+    prefixed: bool,
+) -> Result<usize, &'static str> {
+    let raw = match stage {
+        Some(value) if prefixed => value
+            .trim()
+            .strip_prefix("stage >=")
+            .map(str::trim)
+            .ok_or("invalid_rule")?,
+        Some(value) => value.trim(),
+        None => default_stage,
+    };
+    confession_stage_rank(raw).ok_or("invalid_rule")
+}
+
 fn check_knowledge_allowed(
+    work_dir: &Path,
     npc_id: &str,
     fact_id: &str,
     confession_stage: &str,
 ) -> (bool, &'static str) {
-    if npc_id != "zhang_san" {
-        return (false, "unknown_npc");
-    }
-
-    let required_stage = match fact_id {
-        "liang_is_neighbor" => "denial",
-        "liang_left_nov3" => "vague",
-        "saw_lu_jiping" => "partial",
-        "helped_cover" => "breakdown",
-        _ => return (false, "unknown_fact"),
+    let knowledge = match fs::read_to_string(knowledge_file_path(work_dir, npc_id)) {
+        Ok(contents) => match serde_yaml::from_str::<KnowledgeFile>(&contents) {
+            Ok(knowledge) => knowledge,
+            Err(_) => return (false, "knowledge_file_invalid"),
+        },
+        Err(err) => {
+            return if err.kind() == std::io::ErrorKind::NotFound {
+                (false, "knowledge_file_missing")
+            } else {
+                (false, "knowledge_file_invalid")
+            };
+        }
     };
+
+    if knowledge.npc_id != npc_id {
+        return (false, "npc_mismatch");
+    }
 
     let current_rank =
         confession_stage_rank(confession_stage).expect("validated confession stage required");
-    let required_rank =
-        confession_stage_rank(required_stage).expect("static confession stage must be valid");
 
-    if current_rank >= required_rank {
-        (true, "stage_allows_fact")
-    } else {
-        (false, "stage_blocks_fact")
+    if let Some(fact) = knowledge.knows.iter().find(|fact| fact.fact_id == fact_id) {
+        let required_rank =
+            match required_stage_rank(fact.unlock_condition.as_deref(), "denial", true) {
+                Ok(rank) => rank,
+                Err(reason) => return (false, reason),
+            };
+        return if current_rank >= required_rank {
+            (true, "stage_allows_fact")
+        } else {
+            (false, "stage_blocks_fact")
+        };
     }
+
+    if let Some(fact) = knowledge.hides.iter().find(|fact| fact.fact_id == fact_id) {
+        let required_rank =
+            match required_stage_rank(fact.reveal_stage.as_deref(), "breakdown", false) {
+                Ok(rank) => rank,
+                Err(reason) => return (false, reason),
+            };
+        return if current_rank >= required_rank {
+            (true, "stage_allows_fact")
+        } else {
+            (false, "stage_blocks_fact")
+        };
+    }
+
+    (false, "unknown_fact")
 }
 
 #[async_trait]
@@ -304,7 +380,8 @@ impl Tool for CheckKnowledgeTool {
         let npc_id = input["npc_id"].as_str().unwrap();
         let fact_id = input["fact_id"].as_str().unwrap();
         let confession_stage = input["confession_stage"].as_str().unwrap();
-        let (allowed, reason) = check_knowledge_allowed(npc_id, fact_id, confession_stage);
+        let (allowed, reason) =
+            check_knowledge_allowed(&ctx.work_dir, npc_id, fact_id, confession_stage);
         tool_result(json!({
             "npc_id": npc_id,
             "fact_id": fact_id,
