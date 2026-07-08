@@ -1,4 +1,11 @@
-use std::{fs, path::Path, path::PathBuf};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    path::Path,
+    path::PathBuf,
+    sync::{Mutex, MutexGuard, OnceLock},
+};
 
 use daedalusd::daemon::build_default_tool_registry;
 use daedalusd::tools::narrative::tools as narrative_tools;
@@ -6,6 +13,10 @@ use daedalusd::tools::{Tool, ToolContext, ToolError};
 use daedalusd::types::RiskLevel;
 use serde_json::{json, Value};
 use tempfile::tempdir;
+
+const NARRATIVE_ROOT_ENV: &str = "DAEDALUS_NARRATIVE_ROOT";
+
+static NARRATIVE_ROOT_ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn ctx() -> ToolContext {
     ctx_at(PathBuf::from("/tmp"))
@@ -31,6 +42,51 @@ fn write_knowledge(work_dir: &Path, npc_id: &str, content: &str) {
     let dir = work_dir.join("narrative").join("characters").join(npc_id);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("knowledge.yaml"), content).unwrap();
+}
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    NARRATIVE_ROOT_ENV_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap()
+}
+
+struct NarrativeRootEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous: Option<OsString>,
+}
+
+impl NarrativeRootEnvGuard {
+    fn acquire() -> Self {
+        let lock = env_lock();
+        let previous = env::var_os(NARRATIVE_ROOT_ENV);
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+
+    fn set(&self, value: Option<&str>) {
+        // ponytail: process env is global; tests serialize on a mutex and restore on drop.
+        unsafe {
+            match value {
+                Some(value) => env::set_var(NARRATIVE_ROOT_ENV, value),
+                None => env::remove_var(NARRATIVE_ROOT_ENV),
+            }
+        }
+    }
+}
+
+impl Drop for NarrativeRootEnvGuard {
+    fn drop(&mut self) {
+        // ponytail: restore the original env value so parallel test files see stable state.
+        unsafe {
+            match &self.previous {
+                Some(value) => env::set_var(NARRATIVE_ROOT_ENV, value),
+                None => env::remove_var(NARRATIVE_ROOT_ENV),
+            }
+        }
+    }
 }
 
 #[test]
@@ -93,6 +149,8 @@ async fn invalid_inputs_are_rejected() {
 
 #[tokio::test]
 async fn execute_returns_parseable_json() {
+    let env_guard = NarrativeRootEnvGuard::acquire();
+    env_guard.set(None);
     let temp = tempdir().unwrap();
     write_knowledge(
         temp.path(),
@@ -157,6 +215,8 @@ knows:
 
 #[tokio::test]
 async fn check_knowledge_returns_real_decisions() {
+    let env_guard = NarrativeRootEnvGuard::acquire();
+    env_guard.set(None);
     let temp = tempdir().unwrap();
     write_knowledge(
         temp.path(),
@@ -250,6 +310,8 @@ hides:
 
 #[tokio::test]
 async fn check_knowledge_handles_missing_or_invalid_files() {
+    let env_guard = NarrativeRootEnvGuard::acquire();
+    env_guard.set(None);
     let temp = tempdir().unwrap();
     let cases = vec![(
         ctx_at(temp.path().to_path_buf()),
@@ -335,6 +397,114 @@ knows:
     let parsed: Value = serde_json::from_str(&result.output).unwrap();
     assert_eq!(parsed["allowed"], false);
     assert_eq!(parsed["reason"], "knowledge_file_invalid");
+}
+
+#[tokio::test]
+async fn check_knowledge_resolves_narrative_root_from_env() {
+    let env_guard = NarrativeRootEnvGuard::acquire();
+    let work_dir = tempdir().unwrap();
+    let env_root = tempdir().unwrap();
+
+    write_knowledge(
+        work_dir.path(),
+        "zhang_san",
+        r#"
+npc_id: zhang_san
+knows:
+  - fact_id: from_work_dir
+"#,
+    );
+    write_knowledge(
+        env_root.path(),
+        "zhang_san",
+        r#"
+npc_id: zhang_san
+knows:
+  - fact_id: from_env_root
+"#,
+    );
+
+    let work_ctx = ctx_at(work_dir.path().to_path_buf());
+
+    env_guard.set(None);
+    let result = tool_by_name("check_knowledge")
+        .execute(
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "from_work_dir",
+                "confession_stage": "denial"
+            }),
+            &work_ctx,
+        )
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_str(&result.output).unwrap();
+    assert_eq!(parsed["allowed"], true);
+    assert_eq!(parsed["reason"], "stage_allows_fact");
+
+    env_guard.set(Some(""));
+    let result = tool_by_name("check_knowledge")
+        .execute(
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "from_work_dir",
+                "confession_stage": "denial"
+            }),
+            &work_ctx,
+        )
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_str(&result.output).unwrap();
+    assert_eq!(parsed["allowed"], true);
+    assert_eq!(parsed["reason"], "stage_allows_fact");
+
+    env_guard.set(Some("   "));
+    let result = tool_by_name("check_knowledge")
+        .execute(
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "from_work_dir",
+                "confession_stage": "denial"
+            }),
+            &work_ctx,
+        )
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_str(&result.output).unwrap();
+    assert_eq!(parsed["allowed"], true);
+    assert_eq!(parsed["reason"], "stage_allows_fact");
+
+    env_guard.set(Some(env_root.path().to_str().unwrap()));
+    let result = tool_by_name("check_knowledge")
+        .execute(
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "from_env_root",
+                "confession_stage": "denial"
+            }),
+            &work_ctx,
+        )
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_str(&result.output).unwrap();
+    assert_eq!(parsed["allowed"], true);
+    assert_eq!(parsed["reason"], "stage_allows_fact");
+
+    env_guard.set(Some(env_root.path().join("missing").to_str().unwrap()));
+    let result = tool_by_name("check_knowledge")
+        .execute(
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "from_env_root",
+                "confession_stage": "denial"
+            }),
+            &work_ctx,
+        )
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_str(&result.output).unwrap();
+    assert_eq!(parsed["allowed"], false);
+    assert_eq!(parsed["reason"], "knowledge_file_missing");
 }
 
 #[test]

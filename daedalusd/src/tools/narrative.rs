@@ -90,8 +90,15 @@ fn confession_stage_rank(stage: &str) -> Option<usize> {
         .position(|candidate| candidate == &stage)
 }
 
+fn narrative_root(work_dir: &Path) -> std::path::PathBuf {
+    match std::env::var_os("DAEDALUS_NARRATIVE_ROOT") {
+        Some(root) if !root.to_string_lossy().trim().is_empty() => root.into(),
+        _ => work_dir.to_path_buf(),
+    }
+}
+
 fn knowledge_file_path(work_dir: &Path, npc_id: &str) -> std::path::PathBuf {
-    work_dir
+    narrative_root(work_dir)
         .join("narrative")
         .join("characters")
         .join(npc_id)
