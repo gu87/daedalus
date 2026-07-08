@@ -1,18 +1,23 @@
-# 当前任务：Narrative Backend Phase 1e - 游戏 Tool 最小注册
+# 当前任务：Narrative Backend Phase 1f - check_knowledge 最小真实判定
 
 > standard 模式：总控分派；developer 实现；reviewer 验收。  
 > 总控不写业务代码。developer 只做本任务最小实现；reviewer 只做只读验收。
 
 ## 背景
 
-Daedalus 后续作为《雾井焚痕》AI Narrative Runtime 的后端底座。已完成：
+Phase 1e 已新增并默认注册 5 个 narrative/game tool：
 
 ```text
-Phase 1a: 最小审讯 Session API
-Phase 1b: game_events 事件日志
-Phase 1c: state 响应补齐 emotional_state / turn_count / unlocked_clues / is_ended
-Phase 1d: 阻塞 JSON /message 的确定性阶段/线索事件
+speak
+update_confession_stage
+reveal_clue
+check_knowledge
+log_interrogation_event
 ```
+
+剩余风险里最明确的一项是：`check_knowledge.allowed` 当前固定为 `true`，还不能约束 NPC 角色知识边界。
+
+本轮只解决这个风险的最小可验证版本：让 `check_knowledge` 基于静态角色知识规则返回 true/false。先不接 LLM、不接 DB、不接 Godot、不改 Session API、不改 Agent Loop。
 
 当前分支：
 
@@ -28,208 +33,135 @@ branch: codex/narrative-backend
 branch: main
 ```
 
-本轮只让 daemon 的 ToolRegistry 能提供 5 个游戏专用 Tool 的最小定义和输入校验。先不接 LLM 对话、不写 session DB、不改 Session API、不改 Agent Loop。
-
 ## 目标
 
-新增并注册 5 个 narrative/game tool：
+实现最小 `CharacterKnowledge` 判定能力，并接入 `check_knowledge` tool：
 
-```text
-speak
-update_confession_stage
-reveal_clue
-check_knowledge
-log_interrogation_event
-```
+- `check_knowledge` 输入从 `{fact_id}` 扩展为 `{npc_id, fact_id, confession_stage}`
+- 对已知 NPC/事实/阶段返回确定性 `allowed`
+- 对未知事实返回 `allowed = false`
+- 对阶段未达到的事实返回 `allowed = false`
+- 测试覆盖允许、禁止、未知、无效输入、旧工具回归
 
-这些工具本轮只完成：
+## 非目标
 
-- provider-facing `ToolDef` 定义
-- `validate()` 输入校验
-- `execute()` 返回确定性 JSON 结果
-- `DefaultAgentLoopFactory` 默认注册
-- 测试覆盖工具定义、校验、执行和注册可见性
+本轮不做：
 
-这是临时工具外壳，用来让后续 NPC agent 能拿到稳定工具名和 schema。真正写 DB、校验角色知识、触发 Gate AutoRevision 的逻辑后置。
-
-## 范围
-
-允许修改：
-
-- `daedalusd/src/tools/mod.rs`
-- `daedalusd/src/tools/narrative.rs`（建议新增）
-- `daedalusd/src/daemon.rs`
-- `daedalusd/tests/tool_registry.rs`
-- 如需要可新增一个 focused test：`daedalusd/tests/narrative_tools.rs`
-- `work/callbacks.md`
-- `work/test-report.md`
-
-不做：
-
+- 不读外部 `knowledge.yaml`
+- 不新增配置文件或 managed-agents 配置
 - 不改数据库迁移或表结构
-- 不改 `daedalusd/src/http/session.rs`
+- 不改 `sessions` / `game_events` 写入逻辑
+- 不改 `POST /api/session/:session_id/message`
 - 不改 HTTP 路由
 - 不改 Agent Loop 9 状态机
 - 不接 SSE
 - 不接 Godot
-- 不做 CharacterKnowledgeProvider
+- 不接 LLM
 - 不做 Output Validator / Gate AutoRevision 集成
-- 不改 managed-agents 配置文件
+- 不收紧 `allowed_agents()` 或权限弹窗
 - 不改 `/Users/gu/daedalus-courtroom-demo`
+
+## 最小规则
+
+先内置一个 NPC 的最小知识规则，用于跑通判定形状：
+
+```text
+npc_id: zhang_san
+case_id: wujing_fenhen
+```
+
+允许事实：
+
+| fact_id | 最早允许阶段 |
+|---------|--------------|
+| `liang_is_neighbor` | `denial` |
+| `liang_left_nov3` | `vague` |
+| `saw_lu_jiping` | `partial` |
+| `helped_cover` | `breakdown` |
+
+阶段顺序：
+
+```text
+denial < vague < partial < breakdown
+```
+
+判定规则：
+
+- `npc_id` 不是 `zhang_san`：`allowed = false`
+- `fact_id` 不在规则表：`allowed = false`
+- 当前 `confession_stage` 小于事实最早允许阶段：`allowed = false`
+- 当前 `confession_stage` 大于或等于事实最早允许阶段：`allowed = true`
 
 ## Tool 契约
 
-### 公共要求
-
-- 5 个工具都实现现有 `Tool` trait。
-- `risk_level()` 返回 `RiskLevel::R1`。
-- `allowed_agents()` 暂时返回 `["*"]`，后续 managed-agents 阶段再收紧。
-- `needs_permission()` 返回 `false`。
-- `execute()` 内部先调用 `validate()`；校验失败按现有模式映射为 `ToolError::InvalidInput`。
-- `execute()` 返回 JSON 字符串，`is_error = false`。
-
-### speak
-
-输入：
+### check_knowledge 输入
 
 ```json
 {
-  "text": "我不知道你在说什么。",
-  "emotion": "defensive"
+  "npc_id": "zhang_san",
+  "fact_id": "liang_left_nov3",
+  "confession_stage": "vague"
 }
 ```
 
 校验：
 
-- `text` 必须是非空字符串，trim 后长度不超过 500 字符
-- `emotion` 必须是：`calm` / `defensive` / `nervous` / `anxious` / `angry` / `broken`
-
-输出至少包含：
-
-```json
-{
-  "event_type": "utterance_complete",
-  "text": "...",
-  "emotion": "defensive"
-}
-```
-
-### update_confession_stage
-
-输入：
-
-```json
-{
-  "new_stage": "vague",
-  "reason": "aggressive_pressure"
-}
-```
-
-校验：
-
-- `new_stage` 必须是：`denial` / `vague` / `partial` / `breakdown`
-- `reason` 必须是非空字符串
-
-输出至少包含：
-
-```json
-{
-  "event_type": "stage_change",
-  "new_stage": "vague",
-  "reason": "aggressive_pressure"
-}
-```
-
-### reveal_clue
-
-输入：
-
-```json
-{
-  "clue_id": "photo_1"
-}
-```
-
-校验：
-
-- `clue_id` 必须是非空字符串
-
-输出至少包含：
-
-```json
-{
-  "event_type": "clue_unlocked",
-  "clue_id": "photo_1"
-}
-```
-
-### check_knowledge
-
-输入：
-
-```json
-{
-  "fact_id": "liang_is_neighbor"
-}
-```
-
-校验：
-
+- `npc_id` 必须是非空字符串
 - `fact_id` 必须是非空字符串
+- `confession_stage` 必须是：`denial` / `vague` / `partial` / `breakdown`
 
 输出至少包含：
 
 ```json
 {
-  "fact_id": "liang_is_neighbor",
-  "allowed": true
+  "npc_id": "zhang_san",
+  "fact_id": "liang_left_nov3",
+  "confession_stage": "vague",
+  "allowed": true,
+  "reason": "stage_allows_fact"
 }
 ```
 
-说明：本轮还没有 CharacterKnowledgeProvider，`allowed` 先固定为 `true`，只用于打通工具调用形状。
+`reason` 建议使用稳定字符串：
 
-### log_interrogation_event
-
-输入：
-
-```json
-{
-  "type": "player_pressure",
-  "payload": {
-    "pressure_level": "aggressive"
-  }
-}
+```text
+stage_allows_fact
+unknown_npc
+unknown_fact
+stage_blocks_fact
 ```
 
-校验：
+## 建议实现
 
-- `type` 必须是非空字符串
-- `payload` 必须是 JSON object
+保持最短 diff：
 
-输出至少包含：
+- 可在 `daedalusd/src/tools/narrative.rs` 内部先写私有规则函数，不要为了单个静态表新建复杂抽象。
+- 如果为了测试清晰，需要暴露小函数，可以只暴露最小 `pub(crate)`/`pub` API。
+- 不要引入新依赖。
+- 不要把 YAML 解析提前做掉。
 
-```json
-{
-  "event_type": "player_pressure",
-  "payload": {
-    "pressure_level": "aggressive"
-  }
-}
-```
+## 允许修改
+
+- `daedalusd/src/tools/narrative.rs`
+- `daedalusd/tests/narrative_tools.rs`
+- 如确有必要，可改 `daedalusd/src/tools/mod.rs`
+- `work/callbacks.md`
+- `work/test-report.md`
 
 ## 验收标准
 
 - [ ] `cargo fmt --all -- --check` 通过
+- [ ] `cargo test -p daedalusd --test narrative_tools` 通过
 - [ ] `cargo test -p daedalusd --test tool_registry` 通过
-- [ ] 如新增 `narrative_tools` 测试，`cargo test -p daedalusd --test narrative_tools` 通过
-- [ ] `cargo test -p daedalusd --test http_session` 仍通过，确认 Session API 未被破坏
-- [ ] `cargo test -p daedalusd --test http_tasks` 仍通过，确认旧 task API 未被破坏
+- [ ] `cargo test -p daedalusd --test http_session` 仍通过
+- [ ] `cargo test -p daedalusd --test http_tasks` 仍通过
+- [ ] `cargo clippy -p daedalusd --all-targets -- -D warnings` 通过
 - [ ] `git diff --check` 通过
-- [ ] 测试证明 5 个工具的 definition name 与 schema 可见
-- [ ] 测试证明 5 个工具都不需要权限，risk 为 `R1`
-- [ ] 测试证明无效输入会被拒绝
-- [ ] 测试证明 `execute()` 返回可解析 JSON
-- [ ] 测试证明 `DefaultAgentLoopFactory` 默认注册后，这 5 个工具可被 registry 找到或出现在 definitions 中
+- [ ] 测试证明 `zhang_san + liang_is_neighbor + denial` 返回 `allowed = true`
+- [ ] 测试证明 `zhang_san + saw_lu_jiping + vague` 返回 `allowed = false`
+- [ ] 测试证明未知 `fact_id` 返回 `allowed = false`
+- [ ] 测试证明未知 `npc_id` 返回 `allowed = false`
+- [ ] 测试证明无效 `confession_stage` 被拒绝为 `ToolError::InvalidInput`
 - [ ] 本轮未修改数据库迁移或表结构
 - [ ] 本轮未修改 Session API / HTTP 路由
 - [ ] 未修改 `/Users/gu/daedalus-courtroom-demo`
@@ -238,6 +170,6 @@ log_interrogation_event
 
 ## 当前分工
 
-- 总控：只协调、分派、汇总；不写代码。
+- 总控：只协调、分派、汇总；不写业务代码。
 - developer：做最小实现和最小有效验证。
 - reviewer：基于本任务验收标准只读验收，输出 PASS/FAIL。
