@@ -97,6 +97,18 @@ async fn start_session_returns_session_id() {
     assert_eq!(body["npc_id"], "zhang_san");
     assert_eq!(body["confession_stage"], "denial");
 
+    let session_id = body["session_id"].as_str().unwrap();
+    let resp = reqwest::get(format!("http://{addr}/api/session/{session_id}/state"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let state: serde_json::Value = resp.json().await.unwrap();
+    let events = state["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "session_start");
+    assert_eq!(events[0]["payload"]["npc_id"], "zhang_san");
+    assert_eq!(events[0]["payload"]["case_id"], "wujing_fenhen");
+
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
@@ -139,6 +151,17 @@ async fn message_appends_history_and_state_reads_back() {
     assert_eq!(state["session_id"], session_id);
     assert_eq!(state["case_id"], "wujing_fenhen");
     assert_eq!(state["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(state["events"].as_array().unwrap().len(), 3);
+    assert_eq!(state["events"][1]["event_type"], "player_message");
+    assert_eq!(
+        state["events"][1]["payload"]["player_text"],
+        "你认识梁远山吗？"
+    );
+    assert_eq!(state["events"][2]["event_type"], "npc_reply");
+    assert_eq!(
+        state["events"][2]["payload"]["utterance"],
+        "我不知道你在说什么。"
+    );
     assert_eq!(state["messages"][0]["role"], "player");
     assert_eq!(state["messages"][1]["role"], "npc");
     assert_eq!(state["messages"][1]["text"], "我不知道你在说什么。");

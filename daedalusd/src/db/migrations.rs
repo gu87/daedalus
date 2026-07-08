@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 ",
     },
+    Migration {
+        version: 5,
+        sql: "\
+CREATE TABLE IF NOT EXISTS game_events (
+    event_id      TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_game_events_session_created_at
+    ON game_events(session_id, created_at);
+",
+    },
 ];
 
 /// Apply every pending migration.  Each migration runs inside a
@@ -149,8 +164,8 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(
-            v1, 4,
-            "user_version should be 4 after first run (v1+v2+v3+v4)"
+            v1, 5,
+            "user_version should be 5 after first run (v1+v2+v3+v4+v5)"
         );
 
         // Verify tasks table and index exist.
@@ -177,13 +192,22 @@ mod tests {
             sessions_exists,
             "sessions table must exist after v4 migration"
         );
+        let game_events_exists: bool = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='game_events'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(
+            game_events_exists,
+            "game_events table must exist after v5 migration"
+        );
 
         // Second run — should be a no-op.
         run_all(&mut conn).unwrap();
         let v2: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 4, "user_version should still be 4 after second run");
+        assert_eq!(v2, 5, "user_version should still be 5 after second run");
     }
 
     #[test]
@@ -233,8 +257,8 @@ NOT VALID SQL AT ALL;
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(
-            v, 4,
-            "real migration must succeed after bogus rollback (v1+v2+v3+v4)"
+            v, 5,
+            "real migration must succeed after bogus rollback (v1+v2+v3+v4+v5)"
         );
     }
 }

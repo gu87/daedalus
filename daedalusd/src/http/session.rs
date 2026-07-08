@@ -48,7 +48,16 @@ pub(crate) struct SessionStateResponse {
     confession_stage: String,
     game_state: Value,
     messages: Vec<Value>,
+    events: Vec<GameEventResponse>,
     is_processing: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GameEventResponse {
+    event_id: String,
+    event_type: String,
+    payload: Value,
+    created_at: i64,
 }
 
 #[derive(Serialize)]
@@ -103,9 +112,10 @@ pub(crate) async fn start_session(
     };
 
     tokio::task::spawn_blocking(move || {
-        let conn = crate::db::pool::open(&db_path).map_err(internal)?;
+        let mut conn = crate::db::pool::open(&db_path).map_err(internal)?;
         let now = now_unix();
-        conn.execute(
+        let tx = conn.transaction().map_err(internal)?;
+        tx.execute(
             "INSERT INTO sessions (
                 session_id, npc_id, case_id, confession_stage, game_state_json,
                 messages_jsonl, is_processing, created_at, updated_at
@@ -120,6 +130,19 @@ pub(crate) async fn start_session(
             ],
         )
         .map_err(internal)?;
+        insert_game_event(
+            &tx,
+            &session_id,
+            "session_start",
+            serde_json::json!({
+                "session_id": session_id,
+                "npc_id": npc_id,
+                "case_id": case_id,
+                "confession_stage": confession_stage,
+            }),
+            now,
+        )?;
+        tx.commit().map_err(internal)?;
         Ok::<(), SessionError>(())
     })
     .await
@@ -186,17 +209,17 @@ pub(crate) async fn message_session(
         let revealed_clues: Vec<String> = vec![];
         let player_message = serde_json::json!({
             "role": "player",
-            "text": player_text,
-            "evidence_id": body.evidence_id,
-            "pressure_level": pressure_level,
+            "text": player_text.clone(),
+            "evidence_id": body.evidence_id.clone(),
+            "pressure_level": pressure_level.clone(),
             "ts": now,
         });
         let npc_message = serde_json::json!({
             "role": "npc",
-            "text": utterance,
-            "emotion": emotion,
-            "confession_stage": confession_stage,
-            "revealed_clues": revealed_clues,
+            "text": utterance.clone(),
+            "emotion": emotion.clone(),
+            "confession_stage": confession_stage.clone(),
+            "revealed_clues": revealed_clues.clone(),
             "ts": now,
         });
         let messages_jsonl =
@@ -209,6 +232,34 @@ pub(crate) async fn message_session(
             params![messages_jsonl, now, session_id],
         )
         .map_err(internal)?;
+        insert_game_event(
+            &tx,
+            &session_id,
+            "player_message",
+            serde_json::json!({
+                "session_id": session_id,
+                "npc_id": npc_id,
+                "player_text": player_text,
+                "evidence_id": body.evidence_id,
+                "pressure_level": pressure_level,
+                "confession_stage": confession_stage.clone(),
+            }),
+            now,
+        )?;
+        insert_game_event(
+            &tx,
+            &session_id,
+            "npc_reply",
+            serde_json::json!({
+                "session_id": session_id,
+                "npc_id": npc_id,
+                "utterance": utterance.clone(),
+                "emotion": emotion.clone(),
+                "confession_stage": confession_stage.clone(),
+                "revealed_clues": revealed_clues.clone(),
+            }),
+            now,
+        )?;
         tx.commit().map_err(internal)?;
 
         Ok::<SessionMessageResponse, SessionError>(SessionMessageResponse {
@@ -269,6 +320,7 @@ pub(crate) async fn get_session_state(
                 "session not found: {session_id}"
             )));
         };
+        let events = load_game_events(&conn, &session_id)?;
 
         Ok::<SessionStateResponse, SessionError>(SessionStateResponse {
             session_id,
@@ -277,6 +329,7 @@ pub(crate) async fn get_session_state(
             confession_stage,
             game_state: serde_json::from_str(&game_state_json).map_err(internal)?,
             messages: parse_jsonl(&messages_jsonl)?,
+            events,
             is_processing: is_processing != 0,
         })
     })
@@ -304,6 +357,59 @@ fn parse_jsonl(lines: &str) -> Result<Vec<Value>, SessionError> {
         .collect()
 }
 
+fn insert_game_event(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    event_type: &str,
+    payload: Value,
+    created_at: i64,
+) -> Result<(), SessionError> {
+    tx.execute(
+        "INSERT INTO game_events (event_id, session_id, event_type, payload_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            format!("evt-{}", uuid::Uuid::new_v4()),
+            session_id,
+            event_type,
+            serde_json::to_string(&payload).map_err(internal)?,
+            created_at,
+        ],
+    )
+    .map_err(internal)?;
+    Ok(())
+}
+
+fn load_game_events(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<GameEventResponse>, SessionError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_id, event_type, payload_json, created_at
+             FROM game_events
+             WHERE session_id = ?1
+             ORDER BY created_at ASC, rowid ASC",
+        )
+        .map_err(internal)?;
+    let rows = stmt
+        .query_map(params![session_id], |row| {
+            let payload_json: String = row.get(2)?;
+            Ok(GameEventResponse {
+                event_id: row.get(0)?,
+                event_type: row.get(1)?,
+                payload: serde_json::from_str(&payload_json).map_err(map_serde_err)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(internal)?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row.map_err(internal)?);
+    }
+    Ok(events)
+}
+
 fn deterministic_utterance(confession_stage: &str) -> String {
     match confession_stage {
         "denial" => "我不知道你在说什么。",
@@ -318,6 +424,10 @@ fn now_unix() -> i64 {
 
 fn internal<E: std::fmt::Display>(err: E) -> SessionError {
     SessionError::Internal(err.to_string())
+}
+
+fn map_serde_err(err: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
 }
 
 fn to_http_error(err: SessionError) -> (StatusCode, Json<ErrorResponse>) {
