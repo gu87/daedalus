@@ -145,6 +145,7 @@ async fn message_appends_history_and_state_reads_back() {
     assert_eq!(body["session_id"], session_id);
     assert_eq!(body["utterance"], "我不知道你在说什么。");
     assert_eq!(body["emotion"], "defensive");
+    assert_eq!(body["confession_stage"], "denial");
     assert!(body["revealed_clues"].as_array().unwrap().is_empty());
 
     let resp = client
@@ -156,6 +157,7 @@ async fn message_appends_history_and_state_reads_back() {
     let state: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(state["session_id"], session_id);
     assert_eq!(state["case_id"], "wujing_fenhen");
+    assert_eq!(state["confession_stage"], "denial");
     assert_eq!(state["emotional_state"], "defensive");
     assert_eq!(state["turn_count"], 1);
     assert!(state["unlocked_clues"].as_array().unwrap().is_empty());
@@ -177,6 +179,55 @@ async fn message_appends_history_and_state_reads_back() {
     assert_eq!(state["messages"][0]["role"], "player");
     assert_eq!(state["messages"][1]["role"], "npc");
     assert_eq!(state["messages"][1]["text"], "我不知道你在说什么。");
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn aggressive_message_advances_stage_and_unlocks_clue() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(&db_path).await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/session/{session_id}/message"))
+        .json(&json!({
+            "player_text": "证据已经在我手里了。",
+            "evidence_id": "photo_1",
+            "pressure_level": "aggressive"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["confession_stage"], "vague");
+    assert_eq!(body["revealed_clues"], json!(["photo_1"]));
+
+    let resp = client
+        .get(format!("http://{addr}/api/session/{session_id}/state"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let state: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(state["confession_stage"], "vague");
+    assert_eq!(state["unlocked_clues"], json!(["photo_1"]));
+    assert_eq!(state["turn_count"], 1);
+    assert_eq!(state["events"].as_array().unwrap().len(), 5);
+    assert_eq!(state["events"][2]["event_type"], "stage_change");
+    assert_eq!(state["events"][2]["payload"]["old_stage"], "denial");
+    assert_eq!(state["events"][2]["payload"]["new_stage"], "vague");
+    assert_eq!(state["events"][3]["event_type"], "npc_reply");
+    assert_eq!(state["events"][3]["payload"]["confession_stage"], "vague");
+    assert_eq!(state["events"][4]["event_type"], "clue_unlocked");
+    assert_eq!(state["events"][4]["payload"]["clue_id"], "photo_1");
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;

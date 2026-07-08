@@ -210,13 +210,20 @@ pub(crate) async fn message_session(
             .map_err(internal)?;
 
         let pressure_level = body.pressure_level.unwrap_or_else(|| "normal".into());
-        let utterance = deterministic_utterance(&confession_stage);
+        let next_confession_stage = next_confession_stage(&confession_stage, &pressure_level);
+        let unlocked_clue = body
+            .evidence_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|evidence_id| !evidence_id.is_empty())
+            .map(str::to_string);
+        let utterance = deterministic_utterance(&next_confession_stage);
         let emotion = "defensive".to_string();
-        let revealed_clues: Vec<String> = vec![];
+        let revealed_clues: Vec<String> = unlocked_clue.iter().cloned().collect();
         let player_message = serde_json::json!({
             "role": "player",
             "text": player_text.clone(),
-            "evidence_id": body.evidence_id.clone(),
+            "evidence_id": unlocked_clue.clone(),
             "pressure_level": pressure_level.clone(),
             "ts": now,
         });
@@ -224,7 +231,7 @@ pub(crate) async fn message_session(
             "role": "npc",
             "text": utterance.clone(),
             "emotion": emotion.clone(),
-            "confession_stage": confession_stage.clone(),
+            "confession_stage": next_confession_stage.clone(),
             "revealed_clues": revealed_clues.clone(),
             "ts": now,
         });
@@ -233,9 +240,9 @@ pub(crate) async fn message_session(
 
         tx.execute(
             "UPDATE sessions
-             SET messages_jsonl = ?1, is_processing = 0, updated_at = ?2
-             WHERE session_id = ?3",
-            params![messages_jsonl, now, session_id],
+             SET confession_stage = ?1, messages_jsonl = ?2, is_processing = 0, updated_at = ?3
+             WHERE session_id = ?4",
+            params![next_confession_stage, messages_jsonl, now, session_id],
         )
         .map_err(internal)?;
         insert_game_event(
@@ -246,12 +253,27 @@ pub(crate) async fn message_session(
                 "session_id": session_id,
                 "npc_id": npc_id,
                 "player_text": player_text,
-                "evidence_id": body.evidence_id,
-                "pressure_level": pressure_level,
-                "confession_stage": confession_stage.clone(),
+                "evidence_id": unlocked_clue.clone(),
+                "pressure_level": pressure_level.clone(),
+                "confession_stage": next_confession_stage.clone(),
             }),
             now,
         )?;
+        if confession_stage != next_confession_stage {
+            insert_game_event(
+                &tx,
+                &session_id,
+                "stage_change",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "npc_id": npc_id,
+                    "old_stage": confession_stage,
+                    "new_stage": next_confession_stage.clone(),
+                    "reason": "aggressive_pressure",
+                }),
+                now,
+            )?;
+        }
         insert_game_event(
             &tx,
             &session_id,
@@ -261,11 +283,24 @@ pub(crate) async fn message_session(
                 "npc_id": npc_id,
                 "utterance": utterance.clone(),
                 "emotion": emotion.clone(),
-                "confession_stage": confession_stage.clone(),
+                "confession_stage": next_confession_stage.clone(),
                 "revealed_clues": revealed_clues.clone(),
             }),
             now,
         )?;
+        if let Some(clue_id) = unlocked_clue {
+            insert_game_event(
+                &tx,
+                &session_id,
+                "clue_unlocked",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "npc_id": npc_id,
+                    "clue_id": clue_id,
+                }),
+                now,
+            )?;
+        }
         tx.commit().map_err(internal)?;
 
         Ok::<SessionMessageResponse, SessionError>(SessionMessageResponse {
@@ -273,7 +308,7 @@ pub(crate) async fn message_session(
             npc_id,
             utterance,
             emotion,
-            confession_stage,
+            confession_stage: next_confession_stage,
             revealed_clues,
         })
     })
@@ -420,6 +455,13 @@ fn derive_unlocked_clues(events: &[GameEventResponse]) -> Vec<String> {
 
 fn derive_is_ended(events: &[GameEventResponse]) -> bool {
     events.iter().any(|event| event.event_type == "session_end")
+}
+
+fn next_confession_stage(confession_stage: &str, pressure_level: &str) -> String {
+    if pressure_level == "aggressive" && confession_stage == "denial" {
+        return "vague".into();
+    }
+    confession_stage.to_string()
 }
 
 fn insert_game_event(
