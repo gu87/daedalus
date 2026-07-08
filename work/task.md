@@ -1,4 +1,4 @@
-# 当前任务：Narrative Backend Phase 1d - 确定性阶段/线索事件
+# 当前任务：Narrative Backend Phase 1e - 游戏 Tool 最小注册
 
 > standard 模式：总控分派；developer 实现；reviewer 验收。  
 > 总控不写业务代码。developer 只做本任务最小实现；reviewer 只做只读验收。
@@ -11,6 +11,7 @@ Daedalus 后续作为《雾井焚痕》AI Narrative Runtime 的后端底座。�
 Phase 1a: 最小审讯 Session API
 Phase 1b: game_events 事件日志
 Phase 1c: state 响应补齐 emotional_state / turn_count / unlocked_clues / is_ended
+Phase 1d: 阻塞 JSON /message 的确定性阶段/线索事件
 ```
 
 当前分支：
@@ -27,98 +28,210 @@ branch: codex/narrative-backend
 branch: main
 ```
 
-本轮只让现有阻塞 JSON `/message` 能确定性地产生最小游戏状态变化。不接 Tool / SSE / Godot / LLM / CharacterKnowledgeProvider / Agent Loop，不改 DB schema。
+本轮只让 daemon 的 ToolRegistry 能提供 5 个游戏专用 Tool 的最小定义和输入校验。先不接 LLM 对话、不写 session DB、不改 Session API、不改 Agent Loop。
 
 ## 目标
 
-在 `POST /api/session/:session_id/message` 中加入最小确定性状态效果：
+新增并注册 5 个 narrative/game tool：
 
 ```text
-pressure_level = "aggressive" 且当前 confession_stage = "denial"
-  -> confession_stage 推进到 "vague"
-  -> 写 stage_change 事件
-
-evidence_id 非空
-  -> 写 clue_unlocked 事件
-  -> GET state 的 unlocked_clues 能读回该 clue_id
+speak
+update_confession_stage
+reveal_clue
+check_knowledge
+log_interrogation_event
 ```
 
-这是临时确定性规则，用来跑通游戏状态闭环。后续接 Tool/LLM 后，这些事件会由工具或结构化输出驱动。
+这些工具本轮只完成：
+
+- provider-facing `ToolDef` 定义
+- `validate()` 输入校验
+- `execute()` 返回确定性 JSON 结果
+- `DefaultAgentLoopFactory` 默认注册
+- 测试覆盖工具定义、校验、执行和注册可见性
+
+这是临时工具外壳，用来让后续 NPC agent 能拿到稳定工具名和 schema。真正写 DB、校验角色知识、触发 Gate AutoRevision 的逻辑后置。
 
 ## 范围
 
 允许修改：
 
-- `daedalusd/src/http/session.rs`
-- `daedalusd/tests/http_session.rs`
+- `daedalusd/src/tools/mod.rs`
+- `daedalusd/src/tools/narrative.rs`（建议新增）
+- `daedalusd/src/daemon.rs`
+- `daedalusd/tests/tool_registry.rs`
+- 如需要可新增一个 focused test：`daedalusd/tests/narrative_tools.rs`
 - `work/callbacks.md`
 - `work/test-report.md`
 
 不做：
 
 - 不改数据库迁移或表结构
+- 不改 `daedalusd/src/http/session.rs`
 - 不改 HTTP 路由
 - 不改 Agent Loop 9 状态机
 - 不接 SSE
 - 不接 Godot
-- 不做多 NPC
 - 不做 CharacterKnowledgeProvider
-- 不做 5 个游戏 Tool
-- 不做 Gate AutoRevision 集成
-- 不做 managed-agents 配置
+- 不做 Output Validator / Gate AutoRevision 集成
+- 不改 managed-agents 配置文件
 - 不改 `/Users/gu/daedalus-courtroom-demo`
 
-## API 契约
+## Tool 契约
 
-### POST /api/session/:session_id/message
+### 公共要求
 
-请求/响应结构保持不变。
+- 5 个工具都实现现有 `Tool` trait。
+- `risk_level()` 返回 `RiskLevel::R1`。
+- `allowed_agents()` 暂时返回 `["*"]`，后续 managed-agents 阶段再收紧。
+- `needs_permission()` 返回 `false`。
+- `execute()` 内部先调用 `validate()`；校验失败按现有模式映射为 `ToolError::InvalidInput`。
+- `execute()` 返回 JSON 字符串，`is_error = false`。
 
-新增行为：
+### speak
 
-- `pressure_level == "aggressive"` 且当前 `confession_stage == "denial"` 时：
-  - 更新 sessions 表中的 `confession_stage` 为 `"vague"`。
-  - NPC 回复 response 中的 `confession_stage` 返回 `"vague"`。
-  - NPC message 中的 `confession_stage` 写 `"vague"`。
-  - 写入一条 `stage_change` 事件，payload 至少包含：
+输入：
 
 ```json
 {
-  "session_id": "sess-...",
-  "npc_id": "zhang_san",
-  "old_stage": "denial",
+  "text": "我不知道你在说什么。",
+  "emotion": "defensive"
+}
+```
+
+校验：
+
+- `text` 必须是非空字符串，trim 后长度不超过 500 字符
+- `emotion` 必须是：`calm` / `defensive` / `nervous` / `anxious` / `angry` / `broken`
+
+输出至少包含：
+
+```json
+{
+  "event_type": "utterance_complete",
+  "text": "...",
+  "emotion": "defensive"
+}
+```
+
+### update_confession_stage
+
+输入：
+
+```json
+{
   "new_stage": "vague",
   "reason": "aggressive_pressure"
 }
 ```
 
-- `evidence_id` 非空字符串时：
-  - 写入一条 `clue_unlocked` 事件。
-  - payload 至少包含 `clue_id`，值先等于 `evidence_id`。
-  - response 的 `revealed_clues` 返回该 clue_id。
+校验：
 
-### GET /api/session/:session_id/state
+- `new_stage` 必须是：`denial` / `vague` / `partial` / `breakdown`
+- `reason` 必须是非空字符串
 
-保持 Phase 1c 结构不变。
+输出至少包含：
 
-新增可观察结果：
+```json
+{
+  "event_type": "stage_change",
+  "new_stage": "vague",
+  "reason": "aggressive_pressure"
+}
+```
 
-- aggressive message 后，state 的 `confession_stage` 为 `"vague"`。
-- evidence message 后，state 的 `unlocked_clues` 包含该 clue_id。
-- events 列表能读到 `stage_change` / `clue_unlocked`。
+### reveal_clue
+
+输入：
+
+```json
+{
+  "clue_id": "photo_1"
+}
+```
+
+校验：
+
+- `clue_id` 必须是非空字符串
+
+输出至少包含：
+
+```json
+{
+  "event_type": "clue_unlocked",
+  "clue_id": "photo_1"
+}
+```
+
+### check_knowledge
+
+输入：
+
+```json
+{
+  "fact_id": "liang_is_neighbor"
+}
+```
+
+校验：
+
+- `fact_id` 必须是非空字符串
+
+输出至少包含：
+
+```json
+{
+  "fact_id": "liang_is_neighbor",
+  "allowed": true
+}
+```
+
+说明：本轮还没有 CharacterKnowledgeProvider，`allowed` 先固定为 `true`，只用于打通工具调用形状。
+
+### log_interrogation_event
+
+输入：
+
+```json
+{
+  "type": "player_pressure",
+  "payload": {
+    "pressure_level": "aggressive"
+  }
+}
+```
+
+校验：
+
+- `type` 必须是非空字符串
+- `payload` 必须是 JSON object
+
+输出至少包含：
+
+```json
+{
+  "event_type": "player_pressure",
+  "payload": {
+    "pressure_level": "aggressive"
+  }
+}
+```
 
 ## 验收标准
 
 - [ ] `cargo fmt --all -- --check` 通过
-- [ ] `cargo test -p daedalusd --test http_session` 通过
-- [ ] `cargo test -p daedalusd --test http_tasks` 仍通过，确认旧 task API 不被破坏
+- [ ] `cargo test -p daedalusd --test tool_registry` 通过
+- [ ] 如新增 `narrative_tools` 测试，`cargo test -p daedalusd --test narrative_tools` 通过
+- [ ] `cargo test -p daedalusd --test http_session` 仍通过，确认 Session API 未被破坏
+- [ ] `cargo test -p daedalusd --test http_tasks` 仍通过，确认旧 task API 未被破坏
 - [ ] `git diff --check` 通过
-- [ ] 测试证明 normal message 不改变 `confession_stage`
-- [ ] 测试证明 aggressive message 将 `denial` 推进到 `vague`，response 和 state 都返回 `"vague"`
-- [ ] 测试证明 aggressive message 写入 `stage_change` 事件
-- [ ] 测试证明带 `evidence_id` 的 message 写入 `clue_unlocked` 事件，response `revealed_clues` 与 state `unlocked_clues` 都包含该 id
+- [ ] 测试证明 5 个工具的 definition name 与 schema 可见
+- [ ] 测试证明 5 个工具都不需要权限，risk 为 `R1`
+- [ ] 测试证明无效输入会被拒绝
+- [ ] 测试证明 `execute()` 返回可解析 JSON
+- [ ] 测试证明 `DefaultAgentLoopFactory` 默认注册后，这 5 个工具可被 registry 找到或出现在 definitions 中
 - [ ] 本轮未修改数据库迁移或表结构
-- [ ] 本轮未修改 HTTP 路由
+- [ ] 本轮未修改 Session API / HTTP 路由
 - [ ] 未修改 `/Users/gu/daedalus-courtroom-demo`
 - [ ] developer 完成后追加结论到 `work/callbacks.md`
 - [ ] reviewer 只读复核后追加 PASS/FAIL 到 `work/callbacks.md`
