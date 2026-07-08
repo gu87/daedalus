@@ -60,7 +60,14 @@ async fn invalid_inputs_are_rejected() {
             json!({"new_stage": "oops", "reason": "aggressive_pressure"}),
         ),
         ("reveal_clue", json!({"clue_id": ""})),
-        ("check_knowledge", json!({"fact_id": ""})),
+        (
+            "check_knowledge",
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "liang_is_neighbor",
+                "confession_stage": "oops"
+            }),
+        ),
         (
             "log_interrogation_event",
             json!({"type": "player_pressure", "payload": []}),
@@ -106,13 +113,78 @@ async fn execute_returns_parseable_json() {
     }
 
     let result = tool_by_name("check_knowledge")
-        .execute(json!({"fact_id": "liang_is_neighbor"}), &ctx())
+        .execute(
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "liang_is_neighbor",
+                "confession_stage": "denial"
+            }),
+            &ctx(),
+        )
         .await
         .unwrap();
     assert!(!result.is_error);
     let parsed: Value = serde_json::from_str(&result.output).unwrap();
+    assert_eq!(parsed["npc_id"], "zhang_san");
     assert_eq!(parsed["fact_id"], "liang_is_neighbor");
+    assert_eq!(parsed["confession_stage"], "denial");
     assert_eq!(parsed["allowed"], true);
+    assert_eq!(parsed["reason"], "stage_allows_fact");
+}
+
+#[tokio::test]
+async fn check_knowledge_returns_real_decisions() {
+    let cases = vec![
+        (
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "liang_is_neighbor",
+                "confession_stage": "denial"
+            }),
+            true,
+            "stage_allows_fact",
+        ),
+        (
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "saw_lu_jiping",
+                "confession_stage": "vague"
+            }),
+            false,
+            "stage_blocks_fact",
+        ),
+        (
+            json!({
+                "npc_id": "zhang_san",
+                "fact_id": "unknown_fact",
+                "confession_stage": "breakdown"
+            }),
+            false,
+            "unknown_fact",
+        ),
+        (
+            json!({
+                "npc_id": "unknown_npc",
+                "fact_id": "liang_is_neighbor",
+                "confession_stage": "breakdown"
+            }),
+            false,
+            "unknown_npc",
+        ),
+    ];
+
+    for (input, expected_allowed, expected_reason) in cases {
+        let result = tool_by_name("check_knowledge")
+            .execute(input.clone(), &ctx())
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["npc_id"], input["npc_id"]);
+        assert_eq!(parsed["fact_id"], input["fact_id"]);
+        assert_eq!(parsed["confession_stage"], input["confession_stage"]);
+        assert_eq!(parsed["allowed"], expected_allowed);
+        assert_eq!(parsed["reason"], expected_reason);
+    }
 }
 
 #[test]

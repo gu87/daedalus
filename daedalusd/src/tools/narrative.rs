@@ -13,6 +13,8 @@ pub struct RevealClueTool;
 pub struct CheckKnowledgeTool;
 pub struct LogInterrogationEventTool;
 
+const CONFESSION_STAGES: &[&str] = &["denial", "vague", "partial", "breakdown"];
+
 pub fn tools() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(CheckKnowledgeTool),
@@ -55,6 +57,41 @@ fn enum_string(input: &Value, field: &str, tool: &str, allowed: &[&str]) -> Resu
             "{tool}: '{field}' must be one of {}",
             allowed.join(", ")
         ))
+    }
+}
+
+fn confession_stage_rank(stage: &str) -> Option<usize> {
+    CONFESSION_STAGES
+        .iter()
+        .position(|candidate| candidate == &stage)
+}
+
+fn check_knowledge_allowed(
+    npc_id: &str,
+    fact_id: &str,
+    confession_stage: &str,
+) -> (bool, &'static str) {
+    if npc_id != "zhang_san" {
+        return (false, "unknown_npc");
+    }
+
+    let required_stage = match fact_id {
+        "liang_is_neighbor" => "denial",
+        "liang_left_nov3" => "vague",
+        "saw_lu_jiping" => "partial",
+        "helped_cover" => "breakdown",
+        _ => return (false, "unknown_fact"),
+    };
+
+    let current_rank =
+        confession_stage_rank(confession_stage).expect("validated confession stage required");
+    let required_rank =
+        confession_stage_rank(required_stage).expect("static confession stage must be valid");
+
+    if current_rank >= required_rank {
+        (true, "stage_allows_fact")
+    } else {
+        (false, "stage_blocks_fact")
     }
 }
 
@@ -153,7 +190,7 @@ impl Tool for UpdateConfessionStageTool {
             input,
             "new_stage",
             "update_confession_stage",
-            &["denial", "vague", "partial", "breakdown"],
+            CONFESSION_STAGES,
         )?;
         non_empty_string(input, "reason", "update_confession_stage")?;
         Ok(())
@@ -224,9 +261,14 @@ impl Tool for CheckKnowledgeTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "fact_id": {"type": "string"}
+                    "npc_id": {"type": "string"},
+                    "fact_id": {"type": "string"},
+                    "confession_stage": {
+                        "type": "string",
+                        "enum": CONFESSION_STAGES
+                    }
                 },
-                "required": ["fact_id"]
+                "required": ["npc_id", "fact_id", "confession_stage"]
             }),
         }
     }
@@ -244,7 +286,14 @@ impl Tool for CheckKnowledgeTool {
     }
 
     fn validate(&self, input: &Value, _ctx: &ToolContext) -> Result<(), String> {
+        non_empty_string(input, "npc_id", "check_knowledge")?;
         non_empty_string(input, "fact_id", "check_knowledge")?;
+        enum_string(
+            input,
+            "confession_stage",
+            "check_knowledge",
+            CONFESSION_STAGES,
+        )?;
         Ok(())
     }
 
@@ -252,9 +301,16 @@ impl Tool for CheckKnowledgeTool {
         if let Err(e) = self.validate(&input, ctx) {
             return Err(map_validate_err(e));
         }
+        let npc_id = input["npc_id"].as_str().unwrap();
+        let fact_id = input["fact_id"].as_str().unwrap();
+        let confession_stage = input["confession_stage"].as_str().unwrap();
+        let (allowed, reason) = check_knowledge_allowed(npc_id, fact_id, confession_stage);
         tool_result(json!({
-            "fact_id": input["fact_id"].as_str().unwrap(),
-            "allowed": true,
+            "npc_id": npc_id,
+            "fact_id": fact_id,
+            "confession_stage": confession_stage,
+            "allowed": allowed,
+            "reason": reason,
         }))
     }
 }
