@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -27,6 +27,7 @@ enum LoopMode {
 
 struct FakeProvider {
     mode: LoopMode,
+    captured_messages: Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>>,
 }
 
 #[async_trait]
@@ -37,6 +38,9 @@ impl LLMProvider for FakeProvider {
         _tools: &[ToolDef],
         _config: &ModelConfig,
     ) -> Result<ChatResponse, ProviderError> {
+        if let Some(captured) = &self.captured_messages {
+            captured.lock().unwrap().push(_messages.to_vec());
+        }
         match &self.mode {
             LoopMode::Text(text) => Ok(ChatResponse {
                 content: String::new(),
@@ -63,6 +67,9 @@ impl LLMProvider for FakeProvider {
         _tools: &[ToolDef],
         _config: &ModelConfig,
     ) -> Result<StreamHandle, ProviderError> {
+        if let Some(captured) = &self.captured_messages {
+            captured.lock().unwrap().push(_messages.to_vec());
+        }
         match &self.mode {
             LoopMode::Text(text) => {
                 let (tx, handle) = stream_channel();
@@ -97,6 +104,7 @@ impl LLMProvider for FakeProvider {
 struct TestAgentLoopFactory {
     mode: LoopMode,
     config: DaedalusConfig,
+    captured_messages: Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>>,
 }
 
 impl AgentLoopFactory for TestAgentLoopFactory {
@@ -113,6 +121,7 @@ impl AgentLoopFactory for TestAgentLoopFactory {
         let tool_registry = Arc::new(tool_registry);
         let provider = Arc::new(FakeProvider {
             mode: self.mode.clone(),
+            captured_messages: self.captured_messages.clone(),
         });
         let mut router = Router::new();
         router.register("fake-model", provider);
@@ -169,7 +178,7 @@ fn write_phase1_fixture(base: &std::path::Path) {
     .unwrap();
     std::fs::write(
         base.join("narrative/characters/zhang_san/knowledge.yaml"),
-        "npc_id: zhang_san\ncase_id: wujing_fenhen\nknows:\n  - fact_id: liang_is_neighbor\n    content: \"梁远山是我的邻居。\"\nhides:\n  - fact_id: helped_cover\n    content: \"我帮忙处理了现场。\"\n    reveal_stage: breakdown\n",
+        "npc_id: zhang_san\ncase_id: wujing_fenhen\nknows:\n  - fact_id: liang_is_neighbor\n    content: \"梁远山是我的邻居。\"\n  - fact_id: saw_luggage\n    content: \"梁远山11月3日晚上带着行李出门了。\"\n    unlock_condition: \"stage >= vague\"\nhides:\n  - fact_id: helped_cover\n    content: \"我帮忙处理了现场。\"\n    reveal_stage: breakdown\n",
     )
     .unwrap();
 }
@@ -301,6 +310,18 @@ async fn get_state(addr: &str, session_id: &str) -> serde_json::Value {
     resp.json().await.unwrap()
 }
 
+fn captured_prompt_text(captured: &Arc<Mutex<Vec<Vec<ChatMessage>>>>) -> String {
+    captured
+        .lock()
+        .unwrap()
+        .first()
+        .expect("expected provider messages")
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[tokio::test]
 async fn start_session_returns_session_id() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -313,6 +334,7 @@ async fn start_session_returns_session_id() {
         Arc::new(TestAgentLoopFactory {
             mode: LoopMode::Text("unused".into()),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -358,6 +380,7 @@ async fn message_uses_fake_agent_loop_utterance_and_updates_state() {
         Arc::new(TestAgentLoopFactory {
             mode: LoopMode::Text(fake_summary.into()),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -423,6 +446,157 @@ async fn message_uses_fake_agent_loop_utterance_and_updates_state() {
 }
 
 #[tokio::test]
+async fn task_prompt_injects_output_contract_and_knowledge_boundary() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let fake_summary = r#"{"utterance":"[fake-loop] 我只说这一次。","emotion":"nervous","stage_delta":{"should_change":false,"new_stage":null,"reason":null},"reveals":[],"debug_tags":["nervous_pause"],"confidence":0.85}"#;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(fake_summary.into()),
+            config: config.clone(),
+            captured_messages: Some(captured.clone()),
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({
+            "player_text": "你认识梁远山吗？",
+            "evidence_id": "photo_1",
+            "pressure_level": "normal"
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+
+    let prompt = captured_prompt_text(&captured);
+    assert!(prompt.contains("task_done.summary"));
+    assert!(prompt.contains("JSON object string"));
+    assert!(prompt.contains("utterance"));
+    assert!(prompt.contains("emotion"));
+    assert!(prompt.contains("stage_delta"));
+    assert!(prompt.contains("reveals"));
+    assert!(prompt.contains("debug_tags"));
+    assert!(prompt.contains("confidence"));
+    assert!(prompt.contains("inner_thought"));
+    assert!(prompt.contains("chain_of_thought"));
+    assert!(prompt.contains("forbidden_leak"));
+    assert!(prompt.contains("current_confession_stage"));
+    assert!(prompt.contains("denial"));
+    assert!(prompt.contains("你认识梁远山吗？"));
+    assert!(prompt.contains("normal"));
+    assert!(prompt.contains("photo_1"));
+    assert!(prompt.contains("liang_is_neighbor"));
+    assert!(prompt.contains("梁远山是我的邻居。"));
+    assert!(prompt.contains("saw_luggage"));
+    assert!(prompt.contains("vague"));
+    assert!(!prompt.contains("梁远山11月3日晚上带着行李出门了。"));
+    assert!(prompt.contains("helped_cover"));
+    assert!(prompt.contains("breakdown"));
+    assert!(!prompt.contains("我帮忙处理了现场。"));
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn missing_knowledge_file_still_dispatches_with_status() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let fake_summary = r#"{"utterance":"[fake-loop] 继续。","emotion":"calm","stage_delta":{"should_change":false,"new_stage":null,"reason":null},"reveals":[],"debug_tags":[],"confidence":0.85}"#;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let config = test_config(dir.path(), &db_path);
+    std::fs::remove_file(
+        dir.path()
+            .join("narrative/characters/zhang_san/knowledge.yaml"),
+    )
+    .unwrap();
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(fake_summary.into()),
+            config: config.clone(),
+            captured_messages: Some(captured.clone()),
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "继续说", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["utterance"], "[fake-loop] 继续。");
+
+    let prompt = captured_prompt_text(&captured);
+    assert!(prompt.contains("\"knowledge_status\":\"missing\""));
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn invalid_knowledge_file_still_dispatches_with_status() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let fake_summary = r#"{"utterance":"[fake-loop] 继续。","emotion":"calm","stage_delta":{"should_change":false,"new_stage":null,"reason":null},"reveals":[],"debug_tags":[],"confidence":0.85}"#;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let config = test_config(dir.path(), &db_path);
+    std::fs::write(
+        dir.path()
+            .join("narrative/characters/zhang_san/knowledge.yaml"),
+        "npc_id: [",
+    )
+    .unwrap();
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(fake_summary.into()),
+            config: config.clone(),
+            captured_messages: Some(captured.clone()),
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "继续说", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["utterance"], "[fake-loop] 继续。");
+
+    let prompt = captured_prompt_text(&captured);
+    assert!(prompt.contains("\"knowledge_status\":\"invalid\""));
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
 async fn aggressive_message_advances_stage_and_unlocks_clue() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("test.sqlite");
@@ -437,6 +611,7 @@ async fn aggressive_message_advances_stage_and_unlocks_clue() {
                     .into(),
             ),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -495,6 +670,7 @@ async fn non_json_summary_falls_back_without_leaking() {
         Arc::new(TestAgentLoopFactory {
             mode: LoopMode::Text(raw_summary.into()),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -544,6 +720,7 @@ async fn forbidden_field_falls_back() {
                     .into(),
             ),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -589,6 +766,7 @@ async fn invalid_emotion_falls_back() {
                     .into(),
             ),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -631,6 +809,7 @@ async fn forbidden_term_falls_back() {
                     .into(),
             ),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -682,6 +861,7 @@ async fn invalid_reveal_falls_back() {
                     .into(),
             ),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -722,6 +902,7 @@ async fn message_returns_409_when_session_is_processing() {
         Arc::new(TestAgentLoopFactory {
             mode: LoopMode::Text("unused".into()),
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -800,6 +981,7 @@ async fn task_error_resets_processing_flag() {
         Arc::new(TestAgentLoopFactory {
             mode: LoopMode::Error,
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )
@@ -836,6 +1018,7 @@ async fn timeout_resets_processing_flag() {
         Arc::new(TestAgentLoopFactory {
             mode: LoopMode::Hang,
             config: config.clone(),
+            captured_messages: None,
         }),
         config,
     )

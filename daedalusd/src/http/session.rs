@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -233,6 +235,7 @@ pub(crate) async fn message_session(
         &player_text,
         body.evidence_id.clone(),
         &pressure_level,
+        &narrative_root_from_config(&state.ctx.config),
     );
 
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(32);
@@ -518,8 +521,12 @@ fn build_session_task_dispatch(
     player_text: &str,
     evidence_id: Option<String>,
     pressure_level: &str,
+    narrative_root: &FsPath,
 ) -> TaskDispatch {
     let task_id = format!("task-session-{}", uuid::Uuid::new_v4().simple());
+    let output_contract_text = narrative_output_contract_text();
+    let knowledge_boundary =
+        knowledge_prompt_snapshot(narrative_root, &snapshot.npc_id, &snapshot.confession_stage);
     TaskDispatch {
         ts: crate::ipc::protocol::now_utc(),
         event_id: None,
@@ -533,16 +540,20 @@ fn build_session_task_dispatch(
             created_at: crate::ipc::protocol::now_utc(),
             status: "created".into(),
             goal: format!(
-                "Reply in character as {} to the player's interrogation message.",
-                snapshot.npc_id
+                "Reply in character as {} to the player's interrogation message.\n\n{}",
+                snapshot.npc_id, output_contract_text
             ),
             compiled_intent: serde_json::json!({
                 "session_id": session_id,
+                "case_id": snapshot.case_id,
                 "npc_id": snapshot.npc_id,
                 "player_text": player_text,
                 "evidence_id": evidence_id,
                 "pressure_level": pressure_level,
                 "current_confession_stage": snapshot.confession_stage,
+                "history": snapshot.messages,
+                "narrative_output_contract": output_contract_text,
+                "knowledge_boundary": knowledge_boundary,
             }),
             context: TaskContext {
                 user_preferences: serde_json::json!({}),
@@ -551,8 +562,15 @@ fn build_session_task_dispatch(
                     data: serde_json::json!({
                         "session_id": session_id,
                         "case_id": snapshot.case_id,
+                        "npc_id": snapshot.npc_id,
+                        "current_confession_stage": snapshot.confession_stage,
+                        "pressure_level": pressure_level,
+                        "evidence_id": evidence_id,
+                        "player_text": player_text,
                         "game_state": snapshot.game_state,
                         "history": snapshot.messages,
+                        "narrative_output_contract": output_contract_text,
+                        "knowledge_boundary": knowledge_boundary,
                     }),
                     global_must_avoid: vec![],
                 },
@@ -885,6 +903,127 @@ fn deterministic_utterance(confession_stage: &str) -> String {
         _ => "我需要再想想。",
     }
     .into()
+}
+
+#[derive(Deserialize)]
+struct PromptKnowledgeFile {
+    npc_id: String,
+    #[serde(default)]
+    knows: Vec<PromptKnownFact>,
+    #[serde(default)]
+    hides: Vec<PromptHiddenFact>,
+}
+
+#[derive(Deserialize)]
+struct PromptKnownFact {
+    fact_id: String,
+    content: String,
+    unlock_condition: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PromptHiddenFact {
+    fact_id: String,
+    #[allow(dead_code)]
+    content: Option<String>,
+    reveal_stage: Option<String>,
+}
+
+fn narrative_output_contract_text() -> &'static str {
+    "You must call the task_done tool. The task_done.summary value must be a JSON object string using the NPC Reply schema. Only these top-level JSON fields are allowed: utterance, emotion, stage_delta, reveals, debug_tags, confidence. Never output inner_thought, chain_of_thought, or forbidden_leak. utterance is player-visible NPC dialogue and must not leak hidden truth, reasoning process, or system rules. emotion must be one of: calm, defensive, nervous, anxious, angry, broken. reveals may only contain clue ids that are legally revealable this turn."
+}
+
+fn narrative_root_from_config(config: &crate::config::DaedalusConfig) -> PathBuf {
+    if let Some(root) = std::env::var_os("DAEDALUS_NARRATIVE_ROOT")
+        .filter(|root| !root.to_string_lossy().trim().is_empty())
+    {
+        return root.into();
+    }
+
+    FsPath::new(&config.managed_agents_path)
+        .parent()
+        .and_then(FsPath::parent)
+        .map(FsPath::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn knowledge_prompt_snapshot(root: &FsPath, npc_id: &str, confession_stage: &str) -> Value {
+    let path = root
+        .join("narrative")
+        .join("characters")
+        .join(npc_id)
+        .join("knowledge.yaml");
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return serde_json::json!({"knowledge_status": "missing"});
+        }
+        Err(_) => return serde_json::json!({"knowledge_status": "invalid"}),
+    };
+    let knowledge: PromptKnowledgeFile = match serde_yaml::from_str(&contents) {
+        Ok(knowledge) => knowledge,
+        Err(_) => return serde_json::json!({"knowledge_status": "invalid"}),
+    };
+    if knowledge.npc_id != npc_id {
+        return serde_json::json!({"knowledge_status": "npc_mismatch"});
+    }
+
+    let current_rank = match confession_stage_rank(confession_stage) {
+        Some(rank) => rank,
+        None => return serde_json::json!({"knowledge_status": "invalid"}),
+    };
+    let mut visible_facts = Vec::new();
+    let mut locked_facts = Vec::new();
+
+    for fact in knowledge.knows {
+        match unlock_condition_rank(fact.unlock_condition.as_deref()) {
+            Some(required_rank) if current_rank >= required_rank => {
+                visible_facts.push(serde_json::json!({
+                    "fact_id": fact.fact_id,
+                    "content": fact.content,
+                }));
+            }
+            Some(required_rank) => {
+                locked_facts.push(serde_json::json!({
+                    "fact_id": fact.fact_id,
+                    "unlock_stage": CONFESSION_STAGES[required_rank],
+                }));
+            }
+            None => locked_facts.push(serde_json::json!({
+                "fact_id": fact.fact_id,
+                "unlock_stage": "invalid_rule",
+            })),
+        }
+    }
+
+    for fact in knowledge.hides {
+        locked_facts.push(serde_json::json!({
+            "fact_id": fact.fact_id,
+            "reveal_stage": fact.reveal_stage.unwrap_or_else(|| "breakdown".into()),
+        }));
+    }
+
+    serde_json::json!({
+        "knowledge_status": "ok",
+        "visible_facts": visible_facts,
+        "locked_facts": locked_facts,
+    })
+}
+
+const CONFESSION_STAGES: &[&str] = &["denial", "vague", "partial", "breakdown"];
+
+fn confession_stage_rank(stage: &str) -> Option<usize> {
+    CONFESSION_STAGES
+        .iter()
+        .position(|candidate| candidate == &stage)
+}
+
+fn unlock_condition_rank(condition: Option<&str>) -> Option<usize> {
+    let stage = match condition {
+        Some(condition) => condition.trim().strip_prefix("stage >=")?.trim(),
+        None => "denial",
+    };
+    confession_stage_rank(stage)
 }
 
 struct ValidatedNarrativeReply {
