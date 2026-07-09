@@ -18,7 +18,7 @@ use crate::narrative::{
     events, knowledge, message_log, reply, session_adapter, stage, state as narrative_state,
     stream_events,
 };
-use crate::types::Message;
+use crate::types::{Message, TaskDispatch};
 
 #[derive(Deserialize)]
 pub(crate) struct StartSessionRequest {
@@ -273,69 +273,55 @@ async fn handle_session_message(
         evidence_id: body.evidence_id.clone(),
         pressure_level: &pressure_level,
         narrative_root: &knowledge::root_from_config(&state.ctx.config),
+        revision_feedback: None,
     });
 
-    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(32);
-    let session_state = Arc::new(SessionState::new());
-    if let Some(err_msg) = state
-        .ctx
-        .spawn_task(&dispatch, writer_tx, session_state, None)
-        .await
-    {
-        reset_processing_after_error(&state.db_path, &session_id).await?;
-        let detail = match err_msg {
-            Message::SystemError(se) => se.detail,
-            _ => "failed to spawn session task".into(),
-        };
-        return Err(to_http_error(SessionError::Internal(detail)));
-    }
-
-    let terminal_message = match tokio::time::timeout(SESSION_TASK_WAIT_TIMEOUT, async {
-        loop {
-            match writer_rx.recv().await {
-                Some(Message::TaskDone(done)) => return Ok(done.outbox.summary),
-                Some(Message::TaskError(err)) => return Err(err.detail),
-                Some(_) => continue,
-                None => return Err("session task channel closed".into()),
-            }
-        }
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            reset_processing_after_error(&state.db_path, &session_id).await?;
-            return Err(to_http_error(SessionError::Internal(
-                "session task timed out".into(),
-            )))
-            .map_err(|(status, body)| {
-                if status == StatusCode::INTERNAL_SERVER_ERROR {
-                    (StatusCode::GATEWAY_TIMEOUT, body)
-                } else {
-                    (status, body)
-                }
-            });
-        }
-    };
-
-    let summary = match terminal_message {
-        Ok(summary) => summary,
-        Err(detail) => {
-            reset_processing_after_error(&state.db_path, &session_id).await?;
-            return Err(to_http_error(SessionError::Internal(detail)));
-        }
-    };
-
-    let reply = reply::from_task_summary(
+    let summary = run_session_task(&state, &session_id, &dispatch).await?;
+    let default_reply = reply::fallback_reply(
+        default_confession_stage.clone(),
+        default_revealed_clues.clone(),
+    );
+    let reply = match reply::try_from_task_summary(
         &summary,
         &snapshot.confession_stage,
         &snapshot.game_state,
         body.evidence_id.as_deref(),
-        reply::fallback_reply(
-            default_confession_stage.clone(),
-            default_revealed_clues.clone(),
-        ),
-    );
+        default_reply.clone(),
+    ) {
+        Ok(reply) => reply,
+        Err(first_error) => {
+            let revision_feedback = format!(
+                "{first_error}. Regenerate the NPC Reply JSON without changing hidden facts, stage rules, or evidence gates."
+            );
+            let revision_dispatch =
+                session_adapter::build_task_dispatch(session_adapter::SessionTaskInput {
+                    session_id: &session_id,
+                    npc_id: &snapshot.npc_id,
+                    case_id: &snapshot.case_id,
+                    confession_stage: &snapshot.confession_stage,
+                    game_state: &snapshot.game_state,
+                    history: &snapshot.messages,
+                    player_text: &player_text,
+                    evidence_id: body.evidence_id.clone(),
+                    pressure_level: &pressure_level,
+                    narrative_root: &knowledge::root_from_config(&state.ctx.config),
+                    revision_feedback: Some(&revision_feedback),
+                });
+            let revised_summary = run_session_task(&state, &session_id, &revision_dispatch).await?;
+            match reply::try_from_task_summary(
+                &revised_summary,
+                &snapshot.confession_stage,
+                &snapshot.game_state,
+                body.evidence_id.as_deref(),
+                default_reply.clone(),
+            ) {
+                Ok(revised_reply) => reply::mark_revised(revised_reply, &first_error, 1),
+                Err(second_error) => {
+                    reply::fallback_after_revision(default_reply, &second_error, &first_error, 1)
+                }
+            }
+        }
+    };
     let stage_change_reason = stage::stage_change_reason(stage::StageChangeReasonInput {
         current_stage: &snapshot.confession_stage,
         reply_stage: &reply.confession_stage,
@@ -371,6 +357,63 @@ async fn handle_session_message(
         Err(err) => {
             reset_processing_after_error(&state.db_path, &session_id).await?;
             Err(to_http_error(err))
+        }
+    }
+}
+
+async fn run_session_task(
+    state: &Arc<HttpState>,
+    session_id: &str,
+    dispatch: &TaskDispatch,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(32);
+    let session_state = Arc::new(SessionState::new());
+    if let Some(err_msg) = state
+        .ctx
+        .spawn_task(dispatch, writer_tx, session_state, None)
+        .await
+    {
+        reset_processing_after_error(&state.db_path, session_id).await?;
+        let detail = match err_msg {
+            Message::SystemError(se) => se.detail,
+            _ => "failed to spawn session task".into(),
+        };
+        return Err(to_http_error(SessionError::Internal(detail)));
+    }
+
+    let terminal_message = match tokio::time::timeout(SESSION_TASK_WAIT_TIMEOUT, async {
+        loop {
+            match writer_rx.recv().await {
+                Some(Message::TaskDone(done)) => return Ok(done.outbox.summary),
+                Some(Message::TaskError(err)) => return Err(err.detail),
+                Some(_) => continue,
+                None => return Err("session task channel closed".into()),
+            }
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            reset_processing_after_error(&state.db_path, session_id).await?;
+            return Err(to_http_error(SessionError::Internal(
+                "session task timed out".into(),
+            )))
+            .map_err(|(status, body)| {
+                if status == StatusCode::INTERNAL_SERVER_ERROR {
+                    (StatusCode::GATEWAY_TIMEOUT, body)
+                } else {
+                    (status, body)
+                }
+            });
+        }
+    };
+
+    match terminal_message {
+        Ok(summary) => Ok(summary),
+        Err(detail) => {
+            reset_processing_after_error(&state.db_path, session_id).await?;
+            Err(to_http_error(SessionError::Internal(detail)))
         }
     }
 }

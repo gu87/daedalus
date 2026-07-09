@@ -198,3 +198,29 @@
 
 - 当前 SSE 仍是“处理完成后一次性发出多个事件”的最小封装，不是 token/chunk 级实时流。
 - Godot 项目接线、真实 LLM provider smoke、Gate AutoRevision、多 NPC 状态机、复杂条件表达式仍未进入本轮。
+
+[2026-07-09 19:04 +0800] Phase 2 completion developer 验证：
+
+- `cargo fmt --all -- --check`：通过
+- `cargo test -p daedalusd --test http_session`：27 passed
+  - 新增覆盖 `invalid_first_summary_retries_and_uses_revised_reply`
+  - 证明第一次 NPC summary 未通过 validator 时，会注入 `revision_feedback` 重新 dispatch，同一 session 最终采用第二次合法回复
+  - 证明第一次非法内容不会写入 `messages` 或 `game_events`
+  - 证明 `npc_reply` 事件记录 `validation_status = "revised"`、`revision_error` 与 `revision_attempts`
+- `cargo test -p daedalusd --test prompt`：40 passed
+- `cargo test -p daedalusd --test narrative_tools`：7 passed
+- `cargo test -p daedalusd --test agent_loop`：22 passed
+- `cargo test -p daedalusd --test http_tasks`：15 passed
+- `cargo clippy -p daedalusd --all-targets -- -D warnings`：通过
+- `git diff --check`：通过
+
+结论：
+
+- Phase 2 现在补齐了结构化 NPC 输出失败后的最小 AutoRevision 闭环：第一次非法输出不再直接 fallback，而是把 validator 错误码作为 `revision_feedback` 注入第二次同 NPC 任务；第二次合法则采用修正版，第二次仍非法才安全 fallback。
+- `TaskDispatch` 现在在 revision 场景中携带 `revision_feedback`，同时保留原有输出契约、session 状态、证据、阶段和 knowledge boundary。
+- `npc_reply` 事件现在额外记录 `revision_error` 与 `revision_attempts`，便于游戏侧和调试侧区分 `validated`、`revised`、`fallback`。
+
+剩余风险：
+
+- 这仍是 Phase 2 范围内的单次修正闭环，不是完整 Gate Router 策略系统；现有 Gate AutoRevision 仍主要处理 Agent 执行失败。
+- 真实 LLM provider smoke、Godot 接线、多 NPC 状态机、多证据同时满足、复杂条件表达式仍属于后续 Phase。

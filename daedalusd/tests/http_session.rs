@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 enum LoopMode {
     Text(String),
+    Sequence(Arc<Mutex<Vec<String>>>),
     Error,
     Hang,
 }
@@ -50,6 +51,17 @@ impl LLMProvider for FakeProvider {
                     input: json!({"summary": text}),
                 }],
             }),
+            LoopMode::Sequence(items) => {
+                let text = next_sequence_text(items);
+                Ok(ChatResponse {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "done-1".into(),
+                        name: "task_done".into(),
+                        input: json!({"summary": text}),
+                    }],
+                })
+            }
             LoopMode::Error => Err(ProviderError::Auth {
                 status: 401,
                 body: "fake auth failure".into(),
@@ -89,6 +101,20 @@ impl LLMProvider for FakeProvider {
                 status: 401,
                 body: "fake auth failure".into(),
             }),
+            LoopMode::Sequence(items) => {
+                let (tx, handle) = stream_channel();
+                let content = next_sequence_text(items);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Ok(StreamChunk::ToolCall {
+                            id: "done-1".into(),
+                            name: "task_done".into(),
+                            input: json!({"summary": content}),
+                        }))
+                        .await;
+                });
+                Ok(handle)
+            }
             LoopMode::Hang => {
                 let (tx, handle) = stream_channel();
                 tokio::spawn(async move {
@@ -98,6 +124,15 @@ impl LLMProvider for FakeProvider {
                 Ok(handle)
             }
         }
+    }
+}
+
+fn next_sequence_text(items: &Arc<Mutex<Vec<String>>>) -> String {
+    let mut items = items.lock().unwrap();
+    if items.is_empty() {
+        String::new()
+    } else {
+        items.remove(0)
     }
 }
 
@@ -337,10 +372,14 @@ async fn get_state(addr: &str, session_id: &str) -> serde_json::Value {
 }
 
 fn captured_prompt_text(captured: &Arc<Mutex<Vec<Vec<ChatMessage>>>>) -> String {
+    captured_prompt_text_at(captured, 0)
+}
+
+fn captured_prompt_text_at(captured: &Arc<Mutex<Vec<Vec<ChatMessage>>>>, index: usize) -> String {
     captured
         .lock()
         .unwrap()
-        .first()
+        .get(index)
         .expect("expected provider messages")
         .iter()
         .map(|message| message.content.as_str())
@@ -1487,6 +1526,71 @@ async fn invalid_emotion_falls_back() {
         state["events"][2]["payload"]["validation_error"],
         "invalid_emotion"
     );
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn invalid_first_summary_retries_and_uses_revised_reply() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let outputs = Arc::new(Mutex::new(vec![
+        r#"{"utterance":"不该展示","emotion":"happy","stage_delta":{"should_change":false,"new_stage":null,"reason":null},"reveals":[],"debug_tags":[],"confidence":0.3}"#
+            .to_string(),
+        r#"{"utterance":"[fake-loop] 我重新说。","emotion":"nervous","stage_delta":{"should_change":false,"new_stage":null,"reason":null},"reveals":[],"debug_tags":["nervous_pause"],"confidence":0.8}"#
+            .to_string(),
+    ]));
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Sequence(outputs),
+            config: config.clone(),
+            captured_messages: Some(captured.clone()),
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "继续说", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["utterance"], "[fake-loop] 我重新说。");
+    assert_eq!(body["emotion"], "nervous");
+    assert_eq!(body["confession_stage"], "denial");
+
+    let captured_count = captured.lock().unwrap().len();
+    assert_eq!(captured_count, 2);
+    let retry_prompt = captured_prompt_text_at(&captured, 1);
+    assert!(retry_prompt.contains("revision_feedback"));
+    assert!(retry_prompt.contains("invalid_emotion"));
+    assert!(retry_prompt.contains("Return a corrected task_done.summary JSON object"));
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(state["messages"][1]["text"], "[fake-loop] 我重新说。");
+    assert_eq!(
+        state["events"][2]["payload"]["validation_status"],
+        "revised"
+    );
+    assert_eq!(
+        state["events"][2]["payload"]["validation_error"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        state["events"][2]["payload"]["revision_error"],
+        "invalid_emotion"
+    );
+    assert_eq!(state["events"][2]["payload"]["revision_attempts"], 1);
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;

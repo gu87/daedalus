@@ -60,6 +60,8 @@ pub(crate) fn npc_reply(session_id: &str, npc_id: &str, reply: &NarrativeReply) 
         "revealed_clues": reply.revealed_clues,
         "validation_status": reply.validation_status,
         "validation_error": reply.validation_error,
+        "revision_error": reply.revision_error,
+        "revision_attempts": reply.revision_attempts,
     })
 }
 

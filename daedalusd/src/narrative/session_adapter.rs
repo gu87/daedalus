@@ -16,6 +16,7 @@ pub(crate) struct SessionTaskInput<'a> {
     pub(crate) evidence_id: Option<String>,
     pub(crate) pressure_level: &'a str,
     pub(crate) narrative_root: &'a Path,
+    pub(crate) revision_feedback: Option<&'a str>,
 }
 
 pub(crate) fn build_task_dispatch(input: SessionTaskInput<'_>) -> TaskDispatch {
@@ -26,6 +27,17 @@ pub(crate) fn build_task_dispatch(input: SessionTaskInput<'_>) -> TaskDispatch {
     let history = input.history.to_vec();
     let game_state = input.game_state.clone();
     let evidence_id = input.evidence_id.clone();
+    let revision_feedback = input.revision_feedback.map(str::to_string);
+    let goal = match input.revision_feedback {
+        Some(feedback) => format!(
+            "Reply in character as {} to the player's interrogation message.\n\n{}\n\nPrevious NPC Reply failed validation: {}. Return a corrected task_done.summary JSON object only, preserving the same game-state boundaries.",
+            input.npc_id, output_contract_text, feedback
+        ),
+        None => format!(
+            "Reply in character as {} to the player's interrogation message.\n\n{}",
+            input.npc_id, output_contract_text
+        ),
+    };
 
     TaskDispatch {
         ts: crate::ipc::protocol::now_utc(),
@@ -39,10 +51,7 @@ pub(crate) fn build_task_dispatch(input: SessionTaskInput<'_>) -> TaskDispatch {
             project: "narrative-session".into(),
             created_at: crate::ipc::protocol::now_utc(),
             status: "created".into(),
-            goal: format!(
-                "Reply in character as {} to the player's interrogation message.\n\n{}",
-                input.npc_id, output_contract_text
-            ),
+            goal,
             compiled_intent: serde_json::json!({
                 "session_id": input.session_id,
                 "case_id": input.case_id,
@@ -54,6 +63,7 @@ pub(crate) fn build_task_dispatch(input: SessionTaskInput<'_>) -> TaskDispatch {
                 "history": history,
                 "narrative_output_contract": output_contract_text,
                 "knowledge_boundary": knowledge_boundary,
+                "revision_feedback": revision_feedback.clone(),
             }),
             context: TaskContext {
                 user_preferences: serde_json::json!({}),
@@ -71,10 +81,14 @@ pub(crate) fn build_task_dispatch(input: SessionTaskInput<'_>) -> TaskDispatch {
                         "history": input.history,
                         "narrative_output_contract": output_contract_text,
                         "knowledge_boundary": knowledge_boundary,
+                        "revision_feedback": revision_feedback.clone(),
                     }),
                     global_must_avoid: vec![],
                 },
-                relevant_feedback: serde_json::json!([]),
+                relevant_feedback: revision_feedback
+                    .as_ref()
+                    .map(|feedback| serde_json::json!([feedback]))
+                    .unwrap_or_else(|| serde_json::json!([])),
             },
             execution_plan: serde_json::json!({"primary_agent": input.npc_id}),
             acceptance_criteria: serde_json::json!({}),
