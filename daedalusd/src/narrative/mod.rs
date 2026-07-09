@@ -4,6 +4,7 @@ pub(crate) mod message_log;
 pub(crate) mod reply;
 pub(crate) mod session_adapter;
 pub(crate) mod stage;
+pub(crate) mod stream_events;
 pub(crate) mod validator;
 
 pub(crate) const CONFESSION_STAGES: &[&str] = &["denial", "vague", "partial", "breakdown"];

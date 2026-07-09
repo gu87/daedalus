@@ -14,7 +14,9 @@ use tokio::sync::mpsc;
 
 use super::health::HttpState;
 use crate::ipc::session::SessionState;
-use crate::narrative::{events, knowledge, message_log, reply, session_adapter, stage};
+use crate::narrative::{
+    events, knowledge, message_log, reply, session_adapter, stage, stream_events,
+};
 use crate::types::Message;
 
 #[derive(Deserialize)]
@@ -209,45 +211,19 @@ pub(crate) async fn stream_session_message(
     (StatusCode, Json<ErrorResponse>),
 > {
     let outcome = handle_session_message(state, session_id, body).await?;
-    let mut events = vec![sse_event(
-        "utterance_complete",
-        serde_json::json!({
-            "session_id": outcome.response.session_id,
-            "npc_id": outcome.response.npc_id,
-            "full_text": outcome.response.utterance,
-            "emotion": outcome.response.emotion,
-        }),
-    )];
-
-    if outcome.old_confession_stage != outcome.response.confession_stage {
-        events.push(sse_event(
-            "stage_change",
-            serde_json::json!({
-                "session_id": outcome.response.session_id,
-                "old_stage": outcome.old_confession_stage,
-                "new_stage": outcome.response.confession_stage,
-                "reason": outcome.stage_change_reason,
-            }),
-        ));
-    }
-
-    for clue_id in &outcome.response.revealed_clues {
-        events.push(sse_event(
-            "clue_unlocked",
-            serde_json::json!({
-                "session_id": outcome.response.session_id,
-                "clue_id": clue_id,
-            }),
-        ));
-    }
-
-    events.push(sse_event(
-        "done",
-        serde_json::json!({
-            "session_id": outcome.response.session_id,
-            "confession_stage": outcome.response.confession_stage,
-        }),
-    ));
+    let events = stream_events::message_events(stream_events::MessageStreamInput {
+        session_id: &outcome.response.session_id,
+        npc_id: &outcome.response.npc_id,
+        utterance: &outcome.response.utterance,
+        emotion: &outcome.response.emotion,
+        old_confession_stage: &outcome.old_confession_stage,
+        confession_stage: &outcome.response.confession_stage,
+        stage_change_reason: outcome.stage_change_reason.as_deref(),
+        revealed_clues: &outcome.response.revealed_clues,
+    })
+    .into_iter()
+    .map(|event| sse_event(event.event, event.payload))
+    .collect::<Vec<_>>();
 
     Ok(Sse::new(stream::iter(
         events.into_iter().map(Ok::<_, Infallible>),
