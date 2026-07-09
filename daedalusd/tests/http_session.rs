@@ -877,6 +877,234 @@ async fn wrong_required_evidence_falls_back() {
 }
 
 #[tokio::test]
+async fn required_evidence_ids_allow_any_matching_candidate() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(
+                r#"{"utterance":"[fake-loop] 我能再多说一点。","emotion":"anxious","stage_delta":{"should_change":true,"new_stage":"vague","reason":"camera_matched"},"reveals":[],"debug_tags":[],"confidence":0.7}"#
+                    .into(),
+            ),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session_with_game_state(
+        &addr,
+        json!({
+            "case_id": "wujing_fenhen",
+            "unlocked_evidence_ids": [],
+            "stage_requirements": {
+                "vague": {
+                    "required_evidence_ids": ["photo_1", "camera_2"]
+                }
+            },
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+    )
+    .await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "那这台摄像机呢？", "evidence_id": "camera_2", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["utterance"], "[fake-loop] 我能再多说一点。");
+    assert_eq!(body["confession_stage"], "vague");
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(state["confession_stage"], "vague");
+    assert_eq!(state["events"][2]["payload"]["reason"], "camera_matched");
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn required_evidence_ids_missing_or_wrong_fall_back() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(
+                r#"{"utterance":"不该展示","emotion":"anxious","stage_delta":{"should_change":true,"new_stage":"vague","reason":"camera_matched"},"reveals":[],"debug_tags":[],"confidence":0.7}"#
+                    .into(),
+            ),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session_with_game_state(
+        &addr,
+        json!({
+            "case_id": "wujing_fenhen",
+            "unlocked_evidence_ids": [],
+            "stage_requirements": {
+                "vague": {
+                    "required_evidence_ids": ["photo_1", "camera_2"]
+                }
+            },
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+    )
+    .await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (missing_status, missing_body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "继续说", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(missing_status, 200, "body: {missing_body}");
+    assert_eq!(missing_body["utterance"], "我不知道你在说什么。");
+    assert_eq!(missing_body["confession_stage"], "denial");
+
+    let missing_state = get_state(&addr, session_id).await;
+    assert_eq!(missing_state["confession_stage"], "denial");
+    assert_eq!(
+        missing_state["events"][2]["payload"]["validation_error"],
+        "missing_required_evidence"
+    );
+
+    let session = start_session_with_game_state(
+        &addr,
+        json!({
+            "case_id": "wujing_fenhen",
+            "unlocked_evidence_ids": [],
+            "stage_requirements": {
+                "vague": {
+                    "required_evidence_ids": ["photo_1", "camera_2"]
+                }
+            },
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+    )
+    .await;
+    let wrong_session_id = session["session_id"].as_str().unwrap();
+
+    let (wrong_status, wrong_body) = send_message(
+        &addr,
+        wrong_session_id,
+        json!({"player_text": "继续说", "evidence_id": "note_2", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(wrong_status, 200, "body: {wrong_body}");
+    assert_eq!(wrong_body["utterance"], "我不知道你在说什么。");
+    assert_eq!(wrong_body["confession_stage"], "denial");
+
+    let wrong_state = get_state(&addr, wrong_session_id).await;
+    assert_eq!(wrong_state["confession_stage"], "denial");
+    assert_eq!(
+        wrong_state["events"][2]["payload"]["validation_error"],
+        "missing_required_evidence"
+    );
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn empty_or_combined_stage_requirements_keep_expected_behavior() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(
+                r#"{"utterance":"[fake-loop] 我可以推进。","emotion":"anxious","stage_delta":{"should_change":true,"new_stage":"vague","reason":"matched"},"reveals":[],"debug_tags":[],"confidence":0.7}"#
+                    .into(),
+            ),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+
+    let empty_requirement_session = start_session_with_game_state(
+        &addr,
+        json!({
+            "case_id": "wujing_fenhen",
+            "unlocked_evidence_ids": [],
+            "stage_requirements": {
+                "vague": {
+                    "required_evidence_ids": ["", "  "]
+                }
+            },
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+    )
+    .await;
+    let empty_requirement_session_id = empty_requirement_session["session_id"].as_str().unwrap();
+
+    let (empty_status, empty_body) = send_message(
+        &addr,
+        empty_requirement_session_id,
+        json!({"player_text": "继续说", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(empty_status, 200, "body: {empty_body}");
+    assert_eq!(empty_body["utterance"], "[fake-loop] 我可以推进。");
+    assert_eq!(empty_body["confession_stage"], "vague");
+
+    let combined_requirement_session = start_session_with_game_state(
+        &addr,
+        json!({
+            "case_id": "wujing_fenhen",
+            "unlocked_evidence_ids": [],
+            "stage_requirements": {
+                "vague": {
+                    "required_evidence_id": "photo_1",
+                    "required_evidence_ids": ["camera_2", "receipt_3"]
+                }
+            },
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+    )
+    .await;
+    let combined_requirement_session_id =
+        combined_requirement_session["session_id"].as_str().unwrap();
+
+    let (combined_status, combined_body) = send_message(
+        &addr,
+        combined_requirement_session_id,
+        json!({"player_text": "看这个摄像头记录", "evidence_id": "camera_2", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(combined_status, 200, "body: {combined_body}");
+    assert_eq!(combined_body["utterance"], "[fake-loop] 我可以推进。");
+    assert_eq!(combined_body["confession_stage"], "vague");
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
 async fn jump_stage_delta_falls_back_and_does_not_change_stage() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("test.sqlite");

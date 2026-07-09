@@ -1220,20 +1220,40 @@ fn has_required_stage_evidence(
     new_stage: &str,
     request_evidence_id: Option<&str>,
 ) -> bool {
-    let Some(required_evidence_id) = game_state
+    let Some(requirement) = game_state
         .get("stage_requirements")
         .and_then(|requirements| requirements.get(new_stage))
-        .and_then(|requirement| requirement.get("required_evidence_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
     else {
         return true;
     };
 
+    let mut required_evidence_ids = Vec::new();
+    if let Some(required_evidence_id) = requirement
+        .get("required_evidence_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        required_evidence_ids.push(required_evidence_id);
+    }
+    if let Some(required_evidence_id_list) = requirement
+        .get("required_evidence_ids")
+        .and_then(Value::as_array)
+    {
+        required_evidence_ids.extend(required_evidence_id_list.iter().filter_map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }));
+    }
+    if required_evidence_ids.is_empty() {
+        return true;
+    }
+
     request_evidence_id
         .map(str::trim)
-        .is_some_and(|evidence_id| evidence_id == required_evidence_id)
+        .is_some_and(|evidence_id| required_evidence_ids.contains(&evidence_id))
 }
 
 fn contains_forbidden_field(value: &Value) -> bool {

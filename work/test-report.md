@@ -78,3 +78,41 @@
 
 - 当前仍是 Phase 2d 最小 validator 规则，只支持单个 `required_evidence_id` 的精确匹配，不覆盖多证据或条件表达式门槛。
 - `timeout` 集成测试仍按真实 30 秒等待。
+
+[2026-07-09 14:38 +0800] Phase 2e developer 验证：
+
+- `git fetch origin`：已确认当前分支 `codex/narrative-backend` 包含 `25ae146 chore: dispatch narrative phase 2e`
+- `cargo fmt --all -- --check`：通过
+- `cargo test -p daedalusd --test http_session`：24 passed
+  - 覆盖 `required_evidence_ids_allow_any_matching_candidate`
+  - 覆盖 `required_evidence_ids_missing_or_wrong_fall_back`
+  - 覆盖 `empty_or_combined_stage_requirements_keep_expected_behavior`
+  - Phase 2a validator、Phase 2b prompt/knowledge、Phase 2c 单步阶段跳转、Phase 2d 单证据门槛、aggressive + evidence、build / TaskError / timeout 恢复 processing 测试继续通过
+- `cargo test -p daedalusd --test http_tasks`：15 passed
+- `cargo test -p daedalusd --test narrative_tools`：7 passed
+- `cargo clippy -p daedalusd --all-targets -- -D warnings`：通过
+- `git diff --check`：通过
+
+结论：
+
+- 在 Phase 2d 的单证据门槛基础上，新增支持 `required_evidence_ids` 字符串数组候选。
+- 目标阶段若配置了任一有效 requirement，则本轮 request `evidence_id` 命中旧字段 `required_evidence_id` 或新字段 `required_evidence_ids` 任一候选即可通过。
+- 当 requirement 存在但 request 缺失 `evidence_id` 或证据不命中任一候选时，整体 fallback，稳定返回 `validation_error = "missing_required_evidence"`，不更新 session `confession_stage`，也不暴露原始非法 summary。
+- 空数组、空字符串、缺字段、非字符串元素都会被忽略；若最终没有任何有效 requirement，则保持 Phase 2c / Phase 2d 既有行为不变。
+
+## Reviewer 验收
+
+[2026-07-09 14:47 +0800] PASS
+
+- 只读复核 `work/task.md`、当前工作树与实际 diff；本轮 Phase 2e 业务改动仍落在 `daedalusd/src/http/session.rs`、`daedalusd/tests/http_session.rs`，工作树中的 `.codex/agents/*.md`、`AGENTS.md`、`work/registry.md` 是既有协作脏改动，未作为本轮业务 diff 阻断。
+- `has_required_stage_evidence(...)` 已从单证据校验扩展为收集 `required_evidence_id` 与 `required_evidence_ids` 的有效字符串候选；空字符串、空数组、非字符串元素会被忽略；若最终没有任何有效 requirement，则直接放行，保持 Phase 2c / 2d 既有行为。
+- `required_evidence_ids_allow_any_matching_candidate` 已证明 `required_evidence_ids = ["photo_1", "camera_2"]` 时，请求 `evidence_id = "camera_2"` 可以正常采用 JSON `utterance` / `emotion` / `stage_delta.reason`，推进 `confession_stage` 并写入 `stage_change.reason`。
+- `required_evidence_ids_missing_or_wrong_fall_back` 已证明缺失 evidence 或证据不在候选数组中时会整体 fallback，稳定返回 `validation_error = "missing_required_evidence"`，不更新 session stage，也不暴露原始非法 summary。
+- `empty_or_combined_stage_requirements_keep_expected_behavior` 已证明只有空字符串候选时视为无 requirement，仍保持 Phase 2c 行为；同时存在 `required_evidence_id` 与 `required_evidence_ids` 时，命中任一字段即可通过。
+- 既有 Phase 2a validator、Phase 2b prompt/knowledge、Phase 2c invalid stage transition、Phase 2d 单证据门槛、aggressive + evidence、build failure、TaskError、timeout 恢复 `is_processing = 0` 的测试仍通过。
+- 重跑 `cargo fmt --all -- --check` 通过；`cargo test -p daedalusd --test http_session` 24 passed；`cargo test -p daedalusd --test http_tasks` 15 passed；`cargo test -p daedalusd --test narrative_tools` 7 passed；`cargo clippy -p daedalusd --all-targets -- -D warnings` 通过；`git diff --check` 通过。
+
+剩余风险：
+
+- 当前仍是 Phase 2e 最小 validator 规则，只支持单次 request `evidence_id` 命中旧字段或候选数组中的任一项，不覆盖多证据同时满足或更复杂条件表达式。
+- `timeout` 集成测试仍按真实 30 秒等待。
