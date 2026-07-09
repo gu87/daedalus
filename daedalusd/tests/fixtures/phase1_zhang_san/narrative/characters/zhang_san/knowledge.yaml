@@ -1,0 +1,14 @@
+npc_id: zhang_san
+case_id: wujing_fenhen
+
+knows:
+  - fact_id: liang_is_neighbor
+    content: "梁远山是我的邻居。"
+  - fact_id: liang_left_nov3
+    content: "梁远山11月3日晚上带着行李出门了。"
+    unlock_condition: "stage >= vague"
+
+hides:
+  - fact_id: helped_cover
+    content: "我帮忙处理了现场。"
+    reveal_stage: breakdown

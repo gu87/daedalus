@@ -1,0 +1,9 @@
+agents:
+  zhang_san:
+    role_summary: "A nervous witness in the police station."
+    tools: []
+    permission: ask_user
+    model_strategy:
+      primary:
+        model: fake-model
+      fallback_chain: []
