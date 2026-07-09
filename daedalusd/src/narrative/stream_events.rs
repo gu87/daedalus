@@ -17,7 +17,8 @@ pub(crate) struct MessageStreamInput<'a> {
 }
 
 pub(crate) fn message_events(input: MessageStreamInput<'_>) -> Vec<NarrativeStreamEvent> {
-    let mut events = vec![NarrativeStreamEvent {
+    let mut events = utterance_chunk_events(input.session_id, input.npc_id, input.utterance);
+    events.push(NarrativeStreamEvent {
         event: "utterance_complete",
         payload: serde_json::json!({
             "session_id": input.session_id,
@@ -25,7 +26,7 @@ pub(crate) fn message_events(input: MessageStreamInput<'_>) -> Vec<NarrativeStre
             "full_text": input.utterance,
             "emotion": input.emotion,
         }),
-    }];
+    });
 
     if input.old_confession_stage != input.confession_stage {
         events.push(NarrativeStreamEvent {
@@ -56,6 +57,30 @@ pub(crate) fn message_events(input: MessageStreamInput<'_>) -> Vec<NarrativeStre
             "confession_stage": input.confession_stage,
         }),
     });
+
+    events
+}
+
+fn utterance_chunk_events(
+    session_id: &str,
+    npc_id: &str,
+    utterance: &str,
+) -> Vec<NarrativeStreamEvent> {
+    let mut events = Vec::new();
+    let mut cumulative = String::new();
+
+    for text in utterance.chars().map(|character| character.to_string()) {
+        cumulative.push_str(&text);
+        events.push(NarrativeStreamEvent {
+            event: "utterance_chunk",
+            payload: serde_json::json!({
+                "session_id": session_id,
+                "npc_id": npc_id,
+                "text": text,
+                "cumulative": cumulative,
+            }),
+        });
+    }
 
     events
 }

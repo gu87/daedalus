@@ -516,6 +516,9 @@ async fn stream_message_returns_sse_events_with_stage_and_clue_changes() {
     .await;
     assert_eq!(status, 200, "body: {body}");
     assert!(content_type.starts_with("text/event-stream"));
+    assert!(body.contains("event: utterance_chunk"));
+    assert!(body.contains(r#""text":"[""#));
+    assert!(body.contains(r#""cumulative":"[fake-loop] 我愿意再说一点。""#));
     assert!(body.contains("event: utterance_complete"));
     assert!(body.contains(r#""full_text":"[fake-loop] 我愿意再说一点。""#));
     assert!(body.contains("event: stage_change"));
@@ -580,6 +583,8 @@ async fn stream_message_fallback_does_not_leak_invalid_summary() {
     .await;
     assert_eq!(status, 200, "body: {body}");
     assert!(content_type.starts_with("text/event-stream"));
+    assert!(body.contains("event: utterance_chunk"));
+    assert!(body.contains(r#""cumulative":"我不知道你在说什么。""#));
     assert!(body.contains("event: utterance_complete"));
     assert!(body.contains(r#""full_text":"我不知道你在说什么。""#));
     assert!(!body.contains("不该展示"));
