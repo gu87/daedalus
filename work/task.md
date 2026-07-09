@@ -1,31 +1,29 @@
-# 当前任务：Narrative Backend Phase 2a - 结构化 NPC 输出与最小 Validator
+# 当前任务：Narrative Backend Phase 2b - Prompt 注入输出契约与知识边界
 
 > standard 模式：总控分派；developer 实现；reviewer 验收。  
 > 总控不写业务代码。developer 只做本任务最小实现；reviewer 只做只读验收。
 
 ## 背景
 
-Phase 1 已完成并推送：
+Phase 2a 已完成并推送：
 
 ```text
-e82f392 feat: complete narrative session adapter phase 1
+0b4fd9b feat: validate narrative session replies
 ```
 
-当前能力：
+当前 `/api/session/:session_id/message` 已经会把 `TaskDone.outbox.summary` 当作严格 NPC Reply JSON 校验：
 
-- `POST /api/session/start`
-- `POST /api/session/:session_id/message`
-- `GET /api/session/:session_id/state`
-- `sessions` / `game_events`
-- 最小 `game_events` 日志
-- 5 个 narrative tools
-- `check_knowledge` 读取 `knowledge.yaml`
-- `DAEDALUS_NARRATIVE_ROOT`
-- `/message` 已通过 `DaemonContext::spawn_task(...)` 走 Agent Loop，并等待 `TaskDone` / `TaskError`
+- 合法 JSON 采用 `utterance` / `emotion` / `reveals`
+- 非 JSON、未知字段、禁用字段、非法 emotion、forbidden term、非法 reveal 会 fallback
+- `npc_reply` 事件会记录 `validation_status` / `validation_error`
 
-现在进入 Phase 2：结构化输出 + 强约束。
+但现在 `build_session_task_dispatch(...)` 里给 Agent Loop 的 `goal` 仍然很弱：
 
-本轮只做 Phase 2a 的最小可验收切片：**让 `/message` 不再把任意 task summary 当成 NPC 台词，而是先按 NPC JSON schema 解析和校验；校验失败时使用安全 fallback，不泄露非法内容。**
+```text
+Reply in character as {npc_id} to the player's interrogation message.
+```
+
+虽然 `output_contract` 有 `summary_shape`，真实 LLM 不一定会稳定按约束输出。Phase 2b 的目标是把 Phase 2a 的输出契约和当前剧情知识边界明确注入到 TaskCard，让 Agent 在生成前就看到规则。
 
 当前后端仓库：
 
@@ -43,119 +41,126 @@ branch: main
 
 ## 目标
 
-实现最小 `Narrative Output Validator`：
+实现最小 `Narrative Task Prompt`：
 
 ```text
-TaskDone.outbox.summary
--> 必须解析为 NPC Reply JSON object
--> 校验 schema 和越界字段
--> 合规则用于 utterance/emotion/reveals
--> 不合规则使用当前阶段 fallback 台词
--> 不允许非法内容进入 response/messages/events
+SessionSnapshot + player message + game_state
++ resolved narrative knowledge.yaml
++ NPC Reply JSON contract
+-> TaskDispatch.task_card.goal / context 带明确约束
+-> Agent Loop 更容易输出可被 Phase 2a Validator 接受的 summary JSON
 ```
 
-这是 Phase 2 的第一步。不要在本轮接 SSE、Godot 或完整 Gate AutoRevision。
+本轮不是接真实 LLM，也不是做完整 Provider 抽象。只补 Session Adapter 构造 TaskCard 时缺失的剧情约束。
 
-## NPC Reply JSON schema
+## 必须注入的内容
 
-本轮支持并校验以下结构：
+### 1. 输出格式硬约束
+
+TaskCard 里必须有面向 Agent 的自然语言约束，至少说明：
+
+- 最终必须通过 `task_done` 工具提交 summary
+- `summary` 必须是一个 JSON object 字符串
+- JSON 只能包含这些字段：
+  - `utterance`
+  - `emotion`
+  - `stage_delta`
+  - `reveals`
+  - `debug_tags`
+  - `confidence`
+- 不得输出：
+  - `inner_thought`
+  - `chain_of_thought`
+  - `forbidden_leak`
+- `utterance` 是给玩家看的 NPC 台词，不得泄露隐藏真相、推理过程或系统规则
+- `emotion` 只能是：
+  - `calm`
+  - `defensive`
+  - `nervous`
+  - `anxious`
+  - `angry`
+  - `broken`
+- `reveals` 只能包含本轮可合法揭示的 clue id
+
+这段规则可以放在 `goal`、`context.project_context.data` 或两者都放。优先保持实现简单。
+
+### 2. 当前审讯状态
+
+TaskCard 必须明确包含：
+
+- `session_id`
+- `case_id`
+- `npc_id`
+- `current_confession_stage`
+- `pressure_level`
+- `evidence_id`
+- `player_text`
+- `history`
+
+这些字段当前大多已经存在，developer 需要确认并补齐测试。
+
+### 3. knowledge.yaml 的最小可见知识边界
+
+沿用 Phase 1h 的 root 契约：
+
+```text
+DAEDALUS_NARRATIVE_ROOT 非空 -> 优先使用
+否则 -> 回退当前 Daedalus work_dir / fixture root
+knowledge 路径：{resolved_root}/narrative/characters/{npc_id}/knowledge.yaml
+```
+
+本轮在构造 TaskDispatch 时读取当前 NPC 的 `knowledge.yaml`，并根据 `current_confession_stage` 注入最小知识摘要：
 
 ```json
 {
-  "utterance": "我...我不认识什么梁远山。",
-  "emotion": "nervous",
-  "stage_delta": {
-    "should_change": false,
-    "new_stage": null,
-    "reason": null
-  },
-  "reveals": [],
-  "debug_tags": ["withholding_known_fact"],
-  "confidence": 0.85
+  "visible_facts": [
+    {
+      "fact_id": "liang_is_neighbor",
+      "content": "梁远山是我的邻居。"
+    }
+  ],
+  "locked_facts": [
+    {
+      "fact_id": "helped_cover",
+      "unlock_stage": "breakdown"
+    }
+  ]
 }
 ```
 
-### 必填规则
+规则：
 
-- `utterance`: string，非空，长度不超过 500 字符
-- `emotion`: enum，只允许 `calm` / `defensive` / `nervous` / `anxious` / `angry` / `broken`
-- `stage_delta`: object
-- `stage_delta.should_change`: bool
-- `reveals`: string array
-- `confidence`: number，范围 `0.0..=1.0`
+- `knows` 中无 `unlock_condition` 的事实可见
+- `knows` 中 `unlock_condition: "stage >= X"` 的事实在当前阶段达到 X 后可见，否则进入 locked
+- `hides` 中事实默认不可见，只注入 `fact_id` 和 `reveal_stage`，不要把隐藏事实的 `content` 注入给 Agent
+- 缺文件、YAML 无效、npc_id 不匹配时，不要让 `/message` 失败；注入一个最小 `knowledge_status`，例如 `missing` / `invalid` / `npc_mismatch`
 
-### 条件规则
+阶段顺序沿用现有逻辑：
 
-- `stage_delta.should_change = true` 时：
-  - `stage_delta.new_stage` 必须是 `denial` / `vague` / `partial` / `breakdown`
-  - `stage_delta.reason` 必须是非空 string
-- `stage_delta.should_change = false` 时：
-  - `new_stage` / `reason` 可以为 `null` 或缺省
-
-### 禁止规则
-
-如果 summary JSON object 任一层级出现以下字段，判定无效：
-
-- `inner_thought`
-- `chain_of_thought`
-- `forbidden_leak`
-
-### debug_tags
-
-本轮只允许以下 tag：
-
-- `withholding_known_fact`
-- `nervous_pause`
-- `contradiction_pressure`
-- `evidence_reaction`
-- `fallback`
-
-未知 tag 判定无效。
-
-### forbidden terms
-
-本轮先用最小来源，不做完整 `CharacterKnowledgeProvider`：
-
-- 如果 `game_state.forbidden_terms` 是 string array，则 `utterance` 不得包含其中任一词。
-- 没有该字段时，跳过 forbidden term 校验。
-
-### reveals
-
-本轮最小校验：
-
-- `reveals` 里的每个 clue id 必须满足以下任一条件：
-  - 已存在于 `game_state.unlocked_evidence_ids`
-  - 等于本轮 request 的 `evidence_id`
-- 否则判定无效。
+```text
+denial < vague < partial < breakdown
+```
 
 ## 行为要求
 
-### 合法输出
+### 正常路径
 
-合法 JSON summary 应该：
+- `/message` 仍然通过 `state.ctx.spawn_task(...)` 走 Agent Loop
+- response 行为沿用 Phase 2a validator
+- `TaskDispatch.task_card.goal` 或 `context.project_context.data` 能被测试证明包含：
+  - NPC Reply JSON 输出契约
+  - forbidden fields
+  - 当前 `confession_stage`
+  - 当前 `player_text`
+  - 当前可见事实
+  - 当前隐藏事实的 `fact_id` / `reveal_stage`，但不包含隐藏事实 `content`
 
-- response `utterance` 来自 JSON `utterance`
-- response `emotion` 来自 JSON `emotion`
-- response `revealed_clues` 合并：
-  - 当前确定性 `evidence_id`
-  - JSON `reveals`
-- 写入 `messages_jsonl`
-- 写入 `npc_reply` 事件
-- `GET /state` 能读回
+### 错误路径
 
-### 非法输出
-
-非法 JSON summary 或非 JSON summary 应该：
-
-- 不把原始 summary 暴露给玩家
-- 使用当前阶段 fallback 台词
-- emotion 使用安全默认值
-- `revealed_clues` 不采用非法 reveals
-- 写入 `npc_reply` 事件时记录最小验证状态，例如：
-  - `validation_status = "fallback"`
-  - `validation_error = "..."`
-
-fallback 台词可复用现有 `deterministic_utterance(stage)`，不要新增复杂 fallback 配置。
+- knowledge 文件缺失或坏 YAML 不应导致 `/message` 500
+- 仍应正常走 Agent Loop
+- TaskCard 里记录 knowledge 不可用状态
+- build / TaskError / timeout 仍必须恢复 `is_processing = 0`
 
 ## 非目标
 
@@ -164,16 +169,16 @@ fallback 台词可复用现有 `deterministic_utterance(stage)`，不要新增�
 - 不接 SSE
 - 不接 Godot
 - 不修改 `/Users/gu/daedalus-courtroom-demo`
-- 不实现完整 `CharacterKnowledgeProvider`
-- 不把 knowledge.yaml 注入 prompt
+- 不接真实 LLM
 - 不接 Gate AutoRevision
 - 不修改 Agent Loop 9 状态机
 - 不改变 Tool trait
-- 不做真实 LLM 联调
+- 不实现 `update_confession_stage` / `reveal_clue` 的 DB side effect
 - 不做多 NPC
 - 不做 context 压缩
-- 不实现 `update_confession_stage` / `reveal_clue` 的 DB side effect
-- 不改数据库表结构，除非绝对必要；如改，必须说明原因
+- 不做缓存
+- 不做完整 `CharacterKnowledgeProvider` 抽象，除非 developer 能证明比局部 helper 更小
+- 不改数据库表结构
 
 ## 允许修改
 
@@ -181,43 +186,39 @@ fallback 台词可复用现有 `deterministic_utterance(stage)`，不要新增�
 
 - `daedalusd/src/http/session.rs`
 - `daedalusd/tests/http_session.rs`
-- `daedalusd/tests/fixtures/phase1_zhang_san/...`
+- `daedalusd/tests/fixtures/phase1_zhang_san/narrative/characters/zhang_san/knowledge.yaml`
 - `work/test-report.md`
 - `work/callbacks.md`
 
-如确实需要，为了避免 `session.rs` 继续膨胀，可新增一个小模块：
+如 `session.rs` 明显继续膨胀，可新增一个小模块：
 
-- `daedalusd/src/http/narrative_output.rs`
+- `daedalusd/src/http/narrative_prompt.rs`
 
-如果新增模块，需要只放 parser/validator，不放 HTTP handler。
+如果新增模块，只放 prompt/knowledge snapshot 构造逻辑，不放 HTTP handler。
 
 ## 建议实现
 
 保持短 diff：
 
-- 增加一个内部 `ValidatedNarrativeReply` / `NarrativeValidationError`
-- 增加 `validate_task_summary(...)`
-- 在现有 `reply_from_task_summary(...)` 或其调用点替换逻辑
-- 测试用 fake Agent Loop 返回不同 summary：
-  - 合法 JSON
-  - 非 JSON
-  - forbidden field
-  - forbidden term
-  - invalid reveal
-  - invalid emotion
+- 增加一个小的 `NarrativePromptContext` / `KnowledgePromptSnapshot`
+- 复用或对齐 `check_knowledge` 里已有的 YAML 字段语义
+- 给 `build_session_task_dispatch(...)` 增加必要参数或内部读取 root
+- 在测试 fake provider 中捕获收到的 `ChatMessage` 或 `TaskDispatch` 可见内容
+- 用断言证明 prompt/context 包含应该注入的信息、排除了隐藏 content
 
-不要为了未来抽象出 Provider 层。
+不要为了未来抽象出通用 Provider 层。
 
 ## 验收标准
 
-- [ ] 合法 JSON summary 会成为 response/message/event 的 NPC 回复
-- [ ] 非 JSON summary 不再直接成为 NPC 台词，而是 fallback
-- [ ] `inner_thought` / `chain_of_thought` / `forbidden_leak` 会触发 fallback
-- [ ] invalid emotion 会触发 fallback
-- [ ] `game_state.forbidden_terms` 命中会触发 fallback
-- [ ] 未解锁且非本轮 evidence 的 reveal 会触发 fallback
-- [ ] 合法 reveal 会进入 `revealed_clues` 和 state `unlocked_clues`
-- [ ] 现有 aggressive + evidence 阶段推进仍通过
+- [ ] TaskCard 明确要求 `task_done.summary` 是 NPC Reply JSON object 字符串
+- [ ] TaskCard 明确列出允许字段和禁止字段
+- [ ] TaskCard 明确包含当前 `confession_stage`、`player_text`、`pressure_level`、`evidence_id`
+- [ ] `knowledge.yaml` 可见事实会注入 TaskCard
+- [ ] 未到阶段的 `knows` 事实不会作为 visible fact 注入
+- [ ] `hides` 事实不会泄露 `content`，但可注入 `fact_id` / `reveal_stage`
+- [ ] knowledge 缺文件或坏 YAML 不会让 `/message` 返回 500
+- [ ] Phase 2a 合法 JSON / fallback validator 测试仍通过
+- [ ] aggressive + evidence 阶段推进仍通过
 - [ ] build / TaskError / timeout 恢复 `is_processing = 0` 的测试仍通过
 - [ ] 未修改 `/Users/gu/daedalus-courtroom-demo`
 - [ ] `cargo fmt --all -- --check` 通过
