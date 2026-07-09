@@ -658,6 +658,147 @@ async fn aggressive_message_advances_stage_and_unlocks_clue() {
 }
 
 #[tokio::test]
+async fn valid_stage_delta_advances_one_stage_and_uses_llm_reason() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(
+                r#"{"utterance":"[fake-loop] 我可以多说一点。","emotion":"anxious","stage_delta":{"should_change":true,"new_stage":"vague","reason":"llm_progression"},"reveals":[],"debug_tags":["contradiction_pressure"],"confidence":0.72}"#
+                    .into(),
+            ),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "你现在最好说实话。", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["utterance"], "[fake-loop] 我可以多说一点。");
+    assert_eq!(body["emotion"], "anxious");
+    assert_eq!(body["confession_stage"], "vague");
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(state["confession_stage"], "vague");
+    assert_eq!(state["events"][2]["event_type"], "stage_change");
+    assert_eq!(state["events"][2]["payload"]["reason"], "llm_progression");
+    assert_eq!(
+        state["events"][3]["payload"]["validation_status"],
+        "validated"
+    );
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn jump_stage_delta_falls_back_and_does_not_change_stage() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(
+                r#"{"utterance":"不该展示","emotion":"broken","stage_delta":{"should_change":true,"new_stage":"breakdown","reason":"jump"},"reveals":[],"debug_tags":[],"confidence":0.66}"#
+                    .into(),
+            ),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "继续说", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["utterance"], "我不知道你在说什么。");
+    assert_eq!(body["emotion"], "defensive");
+    assert_eq!(body["confession_stage"], "denial");
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(state["confession_stage"], "denial");
+    assert_eq!(state["events"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        state["events"][2]["payload"]["validation_error"],
+        "invalid_stage_transition"
+    );
+    assert_eq!(
+        state["events"][2]["payload"]["validation_status"],
+        "fallback"
+    );
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn same_stage_delta_change_falls_back() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(
+                r#"{"utterance":"不该展示","emotion":"nervous","stage_delta":{"should_change":true,"new_stage":"denial","reason":"same"},"reveals":[],"debug_tags":[],"confidence":0.66}"#
+                    .into(),
+            ),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "继续说", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["utterance"], "我不知道你在说什么。");
+    assert_eq!(body["confession_stage"], "denial");
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(
+        state["events"][2]["payload"]["validation_error"],
+        "invalid_stage_transition"
+    );
+    assert_eq!(state["confession_stage"], "denial");
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
 async fn non_json_summary_falls_back_without_leaking() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("test.sqlite");

@@ -300,6 +300,7 @@ pub(crate) async fn message_session(
     };
     let reply = reply_from_task_summary(
         &summary,
+        &snapshot.confession_stage,
         &snapshot.game_state,
         body.evidence_id.as_deref(),
         default_reply,
@@ -604,11 +605,17 @@ fn build_session_task_dispatch(
 
 fn reply_from_task_summary(
     summary: &str,
+    current_confession_stage: &str,
     game_state: &Value,
     request_evidence_id: Option<&str>,
     default_reply: SessionReply,
 ) -> SessionReply {
-    match validate_task_summary(summary, game_state, request_evidence_id) {
+    match validate_task_summary(
+        summary,
+        current_confession_stage,
+        game_state,
+        request_evidence_id,
+    ) {
         Ok(validated) => SessionReply {
             utterance: validated.utterance,
             emotion: validated.emotion,
@@ -1044,6 +1051,7 @@ impl NarrativeValidationError {
 
 fn validate_task_summary(
     summary: &str,
+    current_confession_stage: &str,
     game_state: &Value,
     request_evidence_id: Option<&str>,
 ) -> Result<ValidatedNarrativeReply, NarrativeValidationError> {
@@ -1121,6 +1129,9 @@ fn validate_task_summary(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or(NarrativeValidationError("invalid_stage_delta"))?;
+        if !is_valid_stage_transition(current_confession_stage, new_stage) {
+            return Err(NarrativeValidationError("invalid_stage_transition"));
+        }
         (Some(new_stage.to_string()), Some(reason.to_string()))
     } else {
         if stage_delta
@@ -1189,6 +1200,16 @@ fn validate_task_summary(
         stage_change_reason,
         revealed_clues,
     })
+}
+
+fn is_valid_stage_transition(current_stage: &str, new_stage: &str) -> bool {
+    let Some(current_rank) = confession_stage_rank(current_stage) else {
+        return false;
+    };
+    let Some(new_rank) = confession_stage_rank(new_stage) else {
+        return false;
+    };
+    new_rank == current_rank + 1
 }
 
 fn contains_forbidden_field(value: &Value) -> bool {
