@@ -1,26 +1,31 @@
-# 当前任务：Narrative Backend Phase 1 completion - 最小审讯闭环
+# 当前任务：Narrative Backend Phase 2a - 结构化 NPC 输出与最小 Validator
 
 > standard 模式：总控分派；developer 实现；reviewer 验收。  
 > 总控不写业务代码。developer 只做本任务最小实现；reviewer 只做只读验收。
 
 ## 背景
 
-Phase 1a-1h 已完成：
+Phase 1 已完成并推送：
+
+```text
+e82f392 feat: complete narrative session adapter phase 1
+```
+
+当前能力：
 
 - `POST /api/session/start`
 - `POST /api/session/:session_id/message`
 - `GET /api/session/:session_id/state`
-- `sessions` / `game_events` 持久化
-- state 契约字段
-- 确定性阶段推进和线索事件
-- 5 个 narrative/game tool
-- `check_knowledge` 从 narrative root 读取 `knowledge.yaml`
+- `sessions` / `game_events`
+- 最小 `game_events` 日志
+- 5 个 narrative tools
+- `check_knowledge` 读取 `knowledge.yaml`
+- `DAEDALUS_NARRATIVE_ROOT`
+- `/message` 已通过 `DaemonContext::spawn_task(...)` 走 Agent Loop，并等待 `TaskDone` / `TaskError`
 
-现在 Phase 1 还差最小闭环：
+现在进入 Phase 2：结构化输出 + 强约束。
 
-- repo 内有一个可用于 Phase 1 的 `zhang_san` NPC 配置/人格/知识样例
-- `/message` 不再只是纯 HTTP 层假回复，而是通过一个薄的 Session Adapter 走 `DaemonContext::spawn_task`
-- `POST /api/session/:session_id/message` 继续返回当前阻塞 JSON，能手动一轮跑通
+本轮只做 Phase 2a 的最小可验收切片：**让 `/message` 不再把任意 task summary 当成 NPC 台词，而是先按 NPC JSON schema 解析和校验；校验失败时使用安全 fallback，不泄露非法内容。**
 
 当前后端仓库：
 
@@ -38,134 +43,137 @@ branch: main
 
 ## 目标
 
-把 Daedalus Narrative Backend Phase 1 做到“最小可玩后端闭环”：
+实现最小 `Narrative Output Validator`：
 
 ```text
-start session
--> message
--> Session Adapter 构造 task
--> Agent Loop 执行并返回结果
--> Session API 写 messages/game_events/session state
--> state 可读回
+TaskDone.outbox.summary
+-> 必须解析为 NPC Reply JSON object
+-> 校验 schema 和越界字段
+-> 合规则用于 utterance/emotion/reveals
+-> 不合规则使用当前阶段 fallback 台词
+-> 不允许非法内容进入 response/messages/events
 ```
 
-本轮仍然不是完整 AI 剧情引擎，只要求后端底座最小闭环真实接上 Agent Loop。
+这是 Phase 2 的第一步。不要在本轮接 SSE、Godot 或完整 Gate AutoRevision。
 
-## 必做
+## NPC Reply JSON schema
 
-### 1. 补 repo 内 Phase 1 NPC 样例
+本轮支持并校验以下结构：
 
-新增最小 `zhang_san` NPC 样例文件，用于测试和手动验证。
-
-要求：
-
-- 不写入用户家目录配置
-- 不修改 `/Users/gu/daedalus-courtroom-demo`
-- 可以放在 `daedalusd/tests/fixtures/...`、`examples/...` 或更符合现有仓库风格的位置
-- 至少包含：
-  - `SOUL.md` 或等价人格提示样例
-  - `managed-agents.yaml` 中的 `zhang_san`
-  - `narrative/characters/zhang_san/knowledge.yaml`
-
-### 2. 实现最小 Session Adapter
-
-`POST /api/session/:session_id/message` 需要改成：
-
-1. 校验 `player_text`
-2. 原子地把 session 标记为 `is_processing = 1`
-3. 读取 session 当前状态和历史消息
-4. 构造一个 `TaskDispatch`
-5. 调用 `state.ctx.spawn_task(...)`
-6. 等待 `TaskDone` 或 `TaskError`
-7. 从 Agent Loop 结果生成 NPC 回复
-8. 写回：
-   - player message
-   - npc message
-   - `game_events`
-   - `confession_stage`
-   - `is_processing = 0`
-9. 返回现有阻塞 JSON response
-
-保留当前 URL 和响应格式：
-
-```text
-POST /api/session/:session_id/message
-Content-Type: application/json
-
-Response: application/json
+```json
+{
+  "utterance": "我...我不认识什么梁远山。",
+  "emotion": "nervous",
+  "stage_delta": {
+    "should_change": false,
+    "new_stage": null,
+    "reason": null
+  },
+  "reveals": [],
+  "debug_tags": ["withholding_known_fact"],
+  "confidence": 0.85
+}
 ```
 
-本轮不接 SSE。
+### 必填规则
 
-### 3. Agent Loop 结果解析规则
+- `utterance`: string，非空，长度不超过 500 字符
+- `emotion`: enum，只允许 `calm` / `defensive` / `nervous` / `anxious` / `angry` / `broken`
+- `stage_delta`: object
+- `stage_delta.should_change`: bool
+- `reveals`: string array
+- `confidence`: number，范围 `0.0..=1.0`
 
-保持最小实现即可：
+### 条件规则
 
-- 如果 `TaskDone.outbox.summary` 是 JSON object，可尝试读取：
-  - `utterance`
-  - `emotion`
-  - `confession_stage`
-  - `revealed_clues`
-- 如果不是 JSON，就把 summary 当作 `utterance`
-- 缺失字段使用现有默认值
-- 口供阶段推进和 evidence 解锁可继续沿用 daemon 侧确定性规则
-- 不能因为模型输出不是 JSON 就让整个接口失败
+- `stage_delta.should_change = true` 时：
+  - `stage_delta.new_stage` 必须是 `denial` / `vague` / `partial` / `breakdown`
+  - `stage_delta.reason` 必须是非空 string
+- `stage_delta.should_change = false` 时：
+  - `new_stage` / `reason` 可以为 `null` 或缺省
 
-### 4. 错误和状态恢复
+### 禁止规则
 
-必须处理：
+如果 summary JSON object 任一层级出现以下字段，判定无效：
 
-- session 不存在：404
-- session 正在处理：409
-- `spawn_task` build 失败：返回 500，并恢复 `is_processing = 0`
-- `TaskError`：返回 500，并恢复 `is_processing = 0`
-- 等待超时：返回 504 或 500，并恢复 `is_processing = 0`
+- `inner_thought`
+- `chain_of_thought`
+- `forbidden_leak`
 
-不能留下卡死在 `is_processing = 1` 的路径。
+### debug_tags
 
-### 5. 测试证明真的接了 Agent Loop
+本轮只允许以下 tag：
 
-更新或新增测试，必须证明 `/message` 的 utterance 来自 fake Agent Loop / fake provider 的输出，而不是旧的 `deterministic_utterance()`。
+- `withholding_known_fact`
+- `nervous_pause`
+- `contradiction_pressure`
+- `evidence_reaction`
+- `fallback`
 
-建议复用现有测试样板：
+未知 tag 判定无效。
 
-- `daedalusd/tests/full_dispatch.rs` 的 `TestAgentLoopFactory`
-- `daedalusd/tests/http_session.rs` 的 HTTP server helper
-- `daedalusd/src/http/tasks.rs` 的 `TaskDispatch` 构造方式
+### forbidden terms
 
-测试不要依赖真实 LLM 或外部网络。
+本轮先用最小来源，不做完整 `CharacterKnowledgeProvider`：
 
-### 6. 手动一轮验证
+- 如果 `game_state.forbidden_terms` 是 string array，则 `utterance` 不得包含其中任一词。
+- 没有该字段时，跳过 forbidden term 校验。
 
-完成后需要用本地 HTTP server 或等价集成测试证明：
+### reveals
 
-```text
-POST /api/session/start
-POST /api/session/:session_id/message
-GET /api/session/:session_id/state
-```
+本轮最小校验：
 
-这一轮完整闭环可跑通。
+- `reveals` 里的每个 clue id 必须满足以下任一条件：
+  - 已存在于 `game_state.unlocked_evidence_ids`
+  - 等于本轮 request 的 `evidence_id`
+- 否则判定无效。
 
-如果用自动化测试覆盖了同样路径，也要在回传里写清楚对应测试名。
+## 行为要求
+
+### 合法输出
+
+合法 JSON summary 应该：
+
+- response `utterance` 来自 JSON `utterance`
+- response `emotion` 来自 JSON `emotion`
+- response `revealed_clues` 合并：
+  - 当前确定性 `evidence_id`
+  - JSON `reveals`
+- 写入 `messages_jsonl`
+- 写入 `npc_reply` 事件
+- `GET /state` 能读回
+
+### 非法输出
+
+非法 JSON summary 或非 JSON summary 应该：
+
+- 不把原始 summary 暴露给玩家
+- 使用当前阶段 fallback 台词
+- emotion 使用安全默认值
+- `revealed_clues` 不采用非法 reveals
+- 写入 `npc_reply` 事件时记录最小验证状态，例如：
+  - `validation_status = "fallback"`
+  - `validation_error = "..."`
+
+fallback 台词可复用现有 `deterministic_utterance(stage)`，不要新增复杂 fallback 配置。
 
 ## 非目标
 
 本轮不做：
 
-- 不接 Godot
-- 不接 `/Users/gu/daedalus-courtroom-demo`
-- 不修改 `/Users/gu/daedalus-courtroom-demo`
 - 不接 SSE
+- 不接 Godot
+- 不修改 `/Users/gu/daedalus-courtroom-demo`
 - 不实现完整 `CharacterKnowledgeProvider`
-- 不做 Output Validator / Gate AutoRevision 集成
-- 不改 Agent Loop 9 状态机
-- 不改 Tool trait
+- 不把 knowledge.yaml 注入 prompt
+- 不接 Gate AutoRevision
+- 不修改 Agent Loop 9 状态机
+- 不改变 Tool trait
+- 不做真实 LLM 联调
 - 不做多 NPC
-- 不做缓存或 Provider 抽象
-- 不接真实 LLM
-- 不做 UI
-- 不做数据库表结构大改；只有确实必要时才允许迁移，并必须说明原因
+- 不做 context 压缩
+- 不实现 `update_confession_stage` / `reveal_clue` 的 DB side effect
+- 不改数据库表结构，除非绝对必要；如改，必须说明原因
 
 ## 允许修改
 
@@ -173,31 +181,44 @@ GET /api/session/:session_id/state
 
 - `daedalusd/src/http/session.rs`
 - `daedalusd/tests/http_session.rs`
-- repo 内 Phase 1 NPC fixture / example 文件
-- `work/callbacks.md`
+- `daedalusd/tests/fixtures/phase1_zhang_san/...`
 - `work/test-report.md`
+- `work/callbacks.md`
 
-如确实需要，可最小修改：
+如确实需要，为了避免 `session.rs` 继续膨胀，可新增一个小模块：
 
-- `daedalusd/src/http/mod.rs`
-- `daedalusd/src/http/server.rs`
-- `daedalusd/src/daemon.rs`
-- `daedalusd/src/types.rs`
-- `daedalusd/tests/http_tasks.rs`
+- `daedalusd/src/http/narrative_output.rs`
 
-每个超出优先范围的文件都要在回传里说明原因。
+如果新增模块，需要只放 parser/validator，不放 HTTP handler。
+
+## 建议实现
+
+保持短 diff：
+
+- 增加一个内部 `ValidatedNarrativeReply` / `NarrativeValidationError`
+- 增加 `validate_task_summary(...)`
+- 在现有 `reply_from_task_summary(...)` 或其调用点替换逻辑
+- 测试用 fake Agent Loop 返回不同 summary：
+  - 合法 JSON
+  - 非 JSON
+  - forbidden field
+  - forbidden term
+  - invalid reveal
+  - invalid emotion
+
+不要为了未来抽象出 Provider 层。
 
 ## 验收标准
 
-- [ ] `POST /api/session/start` 仍可创建 session
-- [ ] `POST /api/session/:session_id/message` 会构造 task 并调用 `DaemonContext::spawn_task`
-- [ ] `/message` 返回的 utterance 在测试中来自 fake Agent Loop / fake provider 输出
-- [ ] `/message` 仍写入 player/npc messages
-- [ ] `/message` 仍写入 `player_message`、`npc_reply`、必要的 `stage_change`、`clue_unlocked`
-- [ ] `GET /api/session/:session_id/state` 能读回 messages/events/state
-- [ ] 409 processing 分支仍通过
-- [ ] spawn/build/error/timeout 分支不会遗留 `is_processing = 1`
-- [ ] repo 内有最小 `zhang_san` NPC fixture/example
+- [ ] 合法 JSON summary 会成为 response/message/event 的 NPC 回复
+- [ ] 非 JSON summary 不再直接成为 NPC 台词，而是 fallback
+- [ ] `inner_thought` / `chain_of_thought` / `forbidden_leak` 会触发 fallback
+- [ ] invalid emotion 会触发 fallback
+- [ ] `game_state.forbidden_terms` 命中会触发 fallback
+- [ ] 未解锁且非本轮 evidence 的 reveal 会触发 fallback
+- [ ] 合法 reveal 会进入 `revealed_clues` 和 state `unlocked_clues`
+- [ ] 现有 aggressive + evidence 阶段推进仍通过
+- [ ] build / TaskError / timeout 恢复 `is_processing = 0` 的测试仍通过
 - [ ] 未修改 `/Users/gu/daedalus-courtroom-demo`
 - [ ] `cargo fmt --all -- --check` 通过
 - [ ] `cargo test -p daedalusd --test http_session` 通过
