@@ -17,8 +17,8 @@ use daedalusd::llm::{stream_channel, LLMProvider, StreamHandle};
 use daedalusd::tools::registry::ToolRegistry;
 use daedalusd::tools::{Tool, ToolContext, ToolError};
 use daedalusd::types::{
-    ChatMessage, ChatResponse, ModelConfig, PermissionDecision, RiskLevel, StreamChunk, TaskCard,
-    ToolCall, ToolDef, ToolResult,
+    ChatMessage, ChatResponse, Message, ModelConfig, PermissionDecision, RiskLevel, StreamChunk,
+    TaskCard, ToolCall, ToolDef, ToolResult,
 };
 
 fn dummy_task_card() -> TaskCard {
@@ -876,6 +876,7 @@ async fn scenario_16_lifecycle_normal_done() {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
         req_id: "test-req".into(),
+        stream_tx: None,
     };
     let outbox = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
@@ -889,6 +890,47 @@ async fn scenario_16_lifecycle_normal_done() {
     assert_eq!(row.status, registry::AgentRunStatus::Done);
     assert!(row.completed_at.is_some());
     assert!(row.outbox_json.is_some());
+}
+
+#[tokio::test]
+async fn lifecycle_emits_task_stream_for_text_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config_files(&dir);
+    let (db_path, run_id) = lifecycle_db(&dir);
+
+    let provider = Arc::new(FakeProvider::new(make_text_chunks("stream me")));
+    let broker = Arc::new(FakePermissionBroker {
+        decision: PermissionDecision::Approved,
+        delay: None,
+    });
+    let mut ag = build_loop(&dir, provider, vec![], broker);
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(8);
+
+    let lc = LifecycleContext {
+        run_id,
+        db_path,
+        req_id: "test-req".into(),
+        stream_tx: Some(stream_tx),
+    };
+    let outbox = ag
+        .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(outbox.status, "waiting_for_verification");
+
+    let msg = stream_rx
+        .recv()
+        .await
+        .expect("expected task.stream message");
+    match msg {
+        Message::TaskStream(stream) => {
+            assert_eq!(stream.req_id, "test-req");
+            assert_eq!(stream.agent_id, "test-agent");
+            assert_eq!(stream.task_id, "test-task-1");
+            assert_eq!(stream.chunk, "stream me");
+        }
+        other => panic!("expected TaskStream, got {other:?}"),
+    }
 }
 
 /// 17. Timeout writes error + task_timeout taxonomy to DB.
@@ -938,6 +980,7 @@ async fn scenario_17_lifecycle_timeout_writes_error() {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
         req_id: "test-req".into(),
+        stream_tx: None,
     };
     let err = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_millis(100))
@@ -1031,6 +1074,7 @@ async fn scenario_18_lifecycle_cancel_writes_cancelled() {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
         req_id: "test-req".into(),
+        stream_tx: None,
     };
     let err = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(30))
@@ -1072,6 +1116,7 @@ async fn scenario_19_lifecycle_tool_access_rejected_writes_error() {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
         req_id: "test-req".into(),
+        stream_tx: None,
     };
     let err = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
@@ -1104,6 +1149,7 @@ async fn scenario_20_lifecycle_prompt_failure_writes_error() {
         run_id: run_id.clone(),
         db_path: db_path.clone(),
         req_id: "test-req".into(),
+        stream_tx: None,
     };
     let err = ag
         .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))

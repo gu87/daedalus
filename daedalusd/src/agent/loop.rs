@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::select;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +19,8 @@ use crate::llm::router::Router;
 use crate::llm::StreamHandle;
 use crate::tools::registry::ToolRegistry;
 use crate::types::{
-    ChatMessage, Outbox, PermissionDecision, StreamChunk, TaskCard, ToolCall, ToolDef, ToolResult,
+    ChatMessage, Message, Outbox, PermissionDecision, StreamChunk, TaskCard, TaskStream, ToolCall,
+    ToolDef, ToolResult,
 };
 
 use super::heartbeat::HeartbeatLoop;
@@ -74,6 +76,8 @@ pub struct LifecycleContext {
     pub db_path: PathBuf,
     /// P2.7: dispatch req_id, used by AwaitingPermission → PermissionBroker.
     pub req_id: String,
+    /// Optional live stream sink used by daemon-owned runs.
+    pub stream_tx: Option<mpsc::Sender<Message>>,
 }
 
 // ── AgentLoop ───────────────────────────────────────────────────────────
@@ -416,6 +420,7 @@ impl AgentLoop {
                             }
                         }
                         Ok(Some(StreamChunk::Text { content })) => {
+                            self.emit_task_stream(&lifecycle, &task_id, &content).await;
                             assistant_text.push_str(&content);
                             LoopState::ReceivingStream {
                                 stream,
@@ -884,6 +889,34 @@ impl AgentLoop {
                 })
             }
         }
+    }
+
+    async fn emit_task_stream(
+        &self,
+        lifecycle: &Option<(LifecycleContext, JoinHandle<()>)>,
+        task_id: &str,
+        chunk: &str,
+    ) {
+        if chunk.is_empty() {
+            return;
+        }
+        let Some((lc, _)) = lifecycle.as_ref() else {
+            return;
+        };
+        let Some(stream_tx) = &lc.stream_tx else {
+            return;
+        };
+
+        let _ = stream_tx
+            .send(Message::TaskStream(TaskStream {
+                ts: crate::ipc::protocol::now_utc(),
+                event_id: None,
+                req_id: lc.req_id.clone(),
+                agent_id: self.agent_id.clone(),
+                task_id: task_id.to_string(),
+                chunk: chunk.to_string(),
+            }))
+            .await;
     }
 
     async fn execute_with_cancel(

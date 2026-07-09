@@ -270,6 +270,7 @@ impl DaemonContext {
                 run_id: first_run_id,
                 db_path: db_path.clone(),
                 req_id: req_id.clone(),
+                stream_tx: Some(writer_tx2.clone()),
             };
 
             loop {
@@ -535,6 +536,7 @@ impl DaemonContext {
                                     run_id: new_run_id,
                                     db_path: db_path.clone(),
                                     req_id: req_id.clone(),
+                                    stream_tx: Some(writer_tx2.clone()),
                                 };
                                 agent_loop = new_al;
                                 current_agent_id = target_agent_id;
@@ -697,6 +699,7 @@ impl DaemonContext {
                                     run_id: new_run_id,
                                     db_path: db_path.clone(),
                                     req_id: req_id.clone(),
+                                    stream_tx: Some(writer_tx2.clone()),
                                 };
                                 agent_loop = new_al;
                                 // continue to top of loop
