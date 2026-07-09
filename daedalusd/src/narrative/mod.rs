@@ -4,6 +4,7 @@ pub(crate) mod message_log;
 pub(crate) mod reply;
 pub(crate) mod session_adapter;
 pub(crate) mod stage;
+pub(crate) mod state;
 pub(crate) mod stream_events;
 pub(crate) mod validator;
 

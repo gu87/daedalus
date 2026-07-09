@@ -15,7 +15,8 @@ use tokio::sync::mpsc;
 use super::health::HttpState;
 use crate::ipc::session::SessionState;
 use crate::narrative::{
-    events, knowledge, message_log, reply, session_adapter, stage, stream_events,
+    events, knowledge, message_log, reply, session_adapter, stage, state as narrative_state,
+    stream_events,
 };
 use crate::types::Message;
 
@@ -440,24 +441,27 @@ pub(crate) async fn get_session_state(
         };
         let messages = parse_jsonl(&messages_jsonl)?;
         let events = load_game_events(&conn, &session_id)?;
-        let turn_count = derive_turn_count(&messages);
-        let emotional_state = derive_emotional_state(&messages);
-        let unlocked_clues = derive_unlocked_clues(&events);
-        let is_ended = derive_is_ended(&events);
+        let derived_state = narrative_state::derive_session_state(
+            &messages,
+            events.iter().map(|event| narrative_state::EventView {
+                event_type: &event.event_type,
+                payload: &event.payload,
+            }),
+        );
 
         Ok::<SessionStateResponse, SessionError>(SessionStateResponse {
             session_id,
             npc_id,
             case_id,
             confession_stage,
-            emotional_state,
-            turn_count,
-            unlocked_clues,
+            emotional_state: derived_state.emotional_state,
+            turn_count: derived_state.turn_count,
+            unlocked_clues: derived_state.unlocked_clues,
             game_state: serde_json::from_str(&game_state_json).map_err(internal)?,
             messages,
             events,
             is_processing: is_processing != 0,
-            is_ended,
+            is_ended: derived_state.is_ended,
             created_at,
             updated_at,
         })
@@ -688,50 +692,6 @@ fn parse_jsonl(lines: &str) -> Result<Vec<Value>, SessionError> {
         .collect()
 }
 
-fn derive_turn_count(messages: &[Value]) -> usize {
-    messages
-        .iter()
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("npc"))
-        .count()
-}
-
-fn derive_emotional_state(messages: &[Value]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.get("role").and_then(Value::as_str) == Some("npc"))
-        .and_then(|message| message.get("emotion").and_then(Value::as_str))
-        .unwrap_or("calm")
-        .to_string()
-}
-
-fn derive_unlocked_clues(events: &[GameEventResponse]) -> Vec<String> {
-    let mut clues = Vec::new();
-
-    for event in events {
-        if event.event_type != "clue_unlocked" {
-            continue;
-        }
-
-        if let Some(clue_id) = event.payload.get("clue_id").and_then(Value::as_str) {
-            push_unique(&mut clues, clue_id);
-        }
-        if let Some(clue_ids) = event.payload.get("clue_ids").and_then(Value::as_array) {
-            for clue_id in clue_ids {
-                if let Some(clue_id) = clue_id.as_str() {
-                    push_unique(&mut clues, clue_id);
-                }
-            }
-        }
-    }
-
-    clues
-}
-
-fn derive_is_ended(events: &[GameEventResponse]) -> bool {
-    events.iter().any(|event| event.event_type == "session_end")
-}
-
 fn insert_game_event(
     tx: &rusqlite::Transaction<'_>,
     session_id: &str,
@@ -783,12 +743,6 @@ fn load_game_events(
         events.push(row.map_err(internal)?);
     }
     Ok(events)
-}
-
-fn push_unique(values: &mut Vec<String>, value: &str) {
-    if !values.iter().any(|existing| existing == value) {
-        values.push(value.to_string());
-    }
 }
 
 fn now_unix() -> i64 {
