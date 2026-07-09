@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use super::health::HttpState;
 use crate::ipc::session::SessionState;
-use crate::narrative::{events, knowledge, reply, session_adapter, stage};
+use crate::narrative::{events, knowledge, message_log, reply, session_adapter, stage};
 use crate::types::Message;
 
 #[derive(Deserialize)]
@@ -602,21 +602,13 @@ fn persist_session_message_once(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let player_message = serde_json::json!({
-        "role": "player",
-        "text": input.player_text,
-        "evidence_id": unlocked_clue.clone(),
-        "pressure_level": input.pressure_level,
-        "ts": now,
-    });
-    let npc_message = serde_json::json!({
-        "role": "npc",
-        "text": input.reply.utterance.clone(),
-        "emotion": input.reply.emotion.clone(),
-        "confession_stage": input.reply.confession_stage.clone(),
-        "revealed_clues": input.reply.revealed_clues.clone(),
-        "ts": now,
-    });
+    let player_message = message_log::player_message(
+        &input.player_text,
+        unlocked_clue.as_deref(),
+        &input.pressure_level,
+        now,
+    );
+    let npc_message = message_log::npc_message(&input.reply, now);
     let existing_messages: String = tx
         .query_row(
             "SELECT messages_jsonl FROM sessions WHERE session_id = ?1",

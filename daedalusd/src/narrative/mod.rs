@@ -1,5 +1,6 @@
 pub(crate) mod events;
 pub(crate) mod knowledge;
+pub(crate) mod message_log;
 pub(crate) mod reply;
 pub(crate) mod session_adapter;
 pub(crate) mod stage;
