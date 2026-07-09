@@ -1132,6 +1132,9 @@ fn validate_task_summary(
         if !is_valid_stage_transition(current_confession_stage, new_stage) {
             return Err(NarrativeValidationError("invalid_stage_transition"));
         }
+        if !has_required_stage_evidence(game_state, new_stage, request_evidence_id) {
+            return Err(NarrativeValidationError("missing_required_evidence"));
+        }
         (Some(new_stage.to_string()), Some(reason.to_string()))
     } else {
         if stage_delta
@@ -1210,6 +1213,27 @@ fn is_valid_stage_transition(current_stage: &str, new_stage: &str) -> bool {
         return false;
     };
     new_rank == current_rank + 1
+}
+
+fn has_required_stage_evidence(
+    game_state: &Value,
+    new_stage: &str,
+    request_evidence_id: Option<&str>,
+) -> bool {
+    let Some(required_evidence_id) = game_state
+        .get("stage_requirements")
+        .and_then(|requirements| requirements.get(new_stage))
+        .and_then(|requirement| requirement.get("required_evidence_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+
+    request_evidence_id
+        .map(str::trim)
+        .is_some_and(|evidence_id| evidence_id == required_evidence_id)
 }
 
 fn contains_forbidden_field(value: &Value) -> bool {

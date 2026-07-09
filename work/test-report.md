@@ -41,3 +41,40 @@
 - `/Users/gu/daedalus-courtroom-demo` 当前仍是既有脏工作树；本次未修改该仓库，也未见本轮后端 diff 落入其中，但无法仅凭当前状态证明其中既有改动与本轮绝对无关。
 
 [2026-07-09 13:50 +0800] [reviewer] PASS - Narrative Backend Phase 2c 限制 LLM 口供阶段跳转验收通过：只读复核 work/task.md、当前工作树与实际 diff；重跑 cargo fmt --all -- --check、cargo test -p daedalusd --test http_session、cargo test -p daedalusd --test http_tasks、cargo test -p daedalusd --test narrative_tools、cargo clippy -p daedalusd --all-targets -- -D warnings、git diff --check 全部通过。测试已证明合法单步 stage_delta 可推进并写入 reason，跳级和同阶段伪变化会以 invalid_stage_transition fallback 且不更新 session stage。非阻断风险：当前仍是 Phase 2c 最小 validator 规则，不覆盖复杂剧情条件或多 NPC 状态机；timeout 集成测试仍按真实 30 秒等待。
+
+[2026-07-09 14:24 +0800] Phase 2d developer 验证：
+
+- `git fetch origin`：已确认当前分支 `codex/narrative-backend` 包含 `4bd1385 chore: dispatch narrative phase 2d`
+- `cargo fmt --all -- --check`：通过
+- `cargo test -p daedalusd --test http_session`：21 passed
+  - 覆盖 `required_evidence_allows_valid_stage_delta`
+  - 覆盖 `missing_required_evidence_falls_back_when_request_has_no_evidence`
+  - 覆盖 `wrong_required_evidence_falls_back`
+  - Phase 2a validator、Phase 2b prompt/knowledge、Phase 2c 单步阶段跳转、aggressive + evidence、build / TaskError / timeout 恢复 processing 测试继续通过
+- `cargo test -p daedalusd --test http_tasks`：15 passed
+- `cargo test -p daedalusd --test narrative_tools`：7 passed
+- `cargo clippy -p daedalusd --all-targets -- -D warnings`：通过
+- `git diff --check`：通过
+
+结论：
+
+- 在现有 Phase 2c 合法单步阶段推进之后，新增了 Phase 2d 证据门槛校验。
+- 当 `game_state.stage_requirements[new_stage].required_evidence_id` 存在且非空时，本轮 request `evidence_id` 必须精确匹配；缺失或不匹配都会整体 fallback，并稳定返回 `validation_error = "missing_required_evidence"`。
+- fallback 路径不会更新 session `confession_stage`，不会写入新的阶段推进结果，也不会把原始非法 summary 暴露给玩家。
+- 若没有 `stage_requirements`，或目标阶段没有非空 `required_evidence_id`，则保持 Phase 2c 原有行为不变。
+
+## Reviewer 验收
+
+[2026-07-09 14:31 +0800] PASS
+
+- 只读复核 `work/task.md`、当前工作树与实际 diff；本轮 Phase 2d 业务改动仍落在 `daedalusd/src/http/session.rs`、`daedalusd/tests/http_session.rs`，协作提示文件既有脏改动未作为本轮业务 diff 阻断处理。
+- `validate_task_summary(...)` 已在 Phase 2c 合法单步阶段跳转校验之后新增证据门槛判断；目标阶段存在非空 `game_state.stage_requirements[new_stage].required_evidence_id` 时，本轮 request `evidence_id` 必须精确匹配。
+- `required_evidence_allows_valid_stage_delta` 已证明命中必需证据时，合法单步 `stage_delta` 仍会采用 JSON `utterance` / `emotion` / `stage_delta.reason`，更新 session `confession_stage`，并写入 `stage_change` 事件。
+- `missing_required_evidence_falls_back_when_request_has_no_evidence` 与 `wrong_required_evidence_falls_back` 已证明缺失/错误 evidence 会整体 fallback，稳定返回 `validation_error = "missing_required_evidence"`，不更新 session stage，也不暴露原始非法 summary。
+- 既有 Phase 2a validator、Phase 2b prompt/knowledge、Phase 2c 单步阶段跳转、aggressive + evidence、build failure、TaskError、timeout 恢复 `is_processing = 0` 的测试仍通过，说明无 `stage_requirements` 或目标阶段无非空 `required_evidence_id` 时，Phase 2c 行为保持不变。
+- 重跑 `cargo fmt --all -- --check` 通过；`cargo test -p daedalusd --test http_session` 21 passed；`cargo test -p daedalusd --test http_tasks` 15 passed；`cargo test -p daedalusd --test narrative_tools` 7 passed；`cargo clippy -p daedalusd --all-targets -- -D warnings` 通过；`git diff --check` 通过。
+
+剩余风险：
+
+- 当前仍是 Phase 2d 最小 validator 规则，只支持单个 `required_evidence_id` 的精确匹配，不覆盖多证据或条件表达式门槛。
+- `timeout` 集成测试仍按真实 30 秒等待。
