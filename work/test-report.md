@@ -156,3 +156,45 @@
 
 - Phase 3 范围仍未进入本轮：SSE / Godot 接入、真实 LLM provider smoke、Gate AutoRevision、多 NPC 状态机、多证据同时满足、复杂条件表达式。
 - `timeout` 集成测试仍按真实约 30 秒等待，但不阻断 Phase 2 completion。
+
+[2026-07-09 16:34 +0800] Phase 3a developer 验证：
+
+- `git fetch origin`：已确认当前分支 `codex/narrative-backend` 包含 `59c1b15 chore: dispatch narrative phase 3a`
+- `cargo fmt --all -- --check`：通过
+- `cargo test -p daedalusd --test http_session`：26 passed
+  - 覆盖 `stream_message_returns_sse_events_with_stage_and_clue_changes`
+  - 覆盖 `stream_message_fallback_does_not_leak_invalid_summary`
+  - 既有 JSON `/message`、Phase 2a-2e validator/prompt/stage/evidence 回归、build / TaskError / timeout 恢复 processing 测试继续通过
+- `cargo test -p daedalusd --test http_tasks`：15 passed
+- `cargo test -p daedalusd --test narrative_tools`：7 passed
+- `cargo clippy -p daedalusd --all-targets -- -D warnings`：通过
+- `git diff --check`：通过
+
+结论：
+
+- 新增 `POST /api/session/:session_id/message/stream`，返回 `text/event-stream`，并复用现有 `/message` 核心处理逻辑。
+- stream 成功时会发送 `utterance_complete`，阶段变化时发送 `stage_change`，每个已解锁线索发送一个 `clue_unlocked`，最后总是发送 `done`。
+- 本轮仍是“处理完成后一次性发出多个 SSE 事件”的最小实现，不做真正 LLM token streaming，但 Godot 已可通过 Daedalus Session API 获得 SSE 格式的审讯结果事件流。
+- fallback 时 SSE 里的 `utterance_complete.full_text` 仍是安全 fallback 文本，不会泄露非法 summary；现有 JSON `/message` 行为保持不变。
+
+剩余风险：
+
+- 当前 SSE 是完成后批量发送的最小封装，不是 token/chunk 实时流。
+- Phase 3 后续事项仍未进入本轮：Godot 项目代码接线、真实 LLM provider smoke、Gate AutoRevision、多 NPC 状态机、复杂条件表达式。
+
+## Reviewer 验收
+
+[2026-07-09 16:42 +0800] PASS
+
+- 只读复核 `work/task.md`、当前工作树与实际 diff；本轮 Phase 3a 业务改动落在 `daedalusd/src/http/server.rs`、`daedalusd/src/http/session.rs`、`daedalusd/tests/http_session.rs`，工作树中的 `.codex/agents/*.md`、`AGENTS.md`、`work/registry.md` 为既有协作脏改动，未作为本轮业务 diff 阻断。
+- `make_router(...)` 与 `run_http(...)` 都已注册 `POST /api/session/:session_id/message/stream`；`stream_session_message(...)` 通过共享 `handle_session_message(...)` 复用现有 `/message` 核心处理逻辑，JSON `/message` 返回路径仍由同一 helper 产出 `SessionMessageResponse`。
+- `stream_message_returns_sse_events_with_stage_and_clue_changes` 已证明 stream 端点返回 `text/event-stream`，包含 `utterance_complete`、`stage_change`、`clue_unlocked`、`done`，且会把阶段推进与线索解锁同步反映到 `/state`。
+- `stream_message_fallback_does_not_leak_invalid_summary` 已证明 fallback 时 SSE 的 `utterance_complete.full_text` 返回安全 fallback 文本，不暴露非法 summary，且不会伪造 `stage_change`。
+- 原有 JSON `/message` 行为和 Phase 2a-2e 回归仍通过：`http_session` 26 passed，继续覆盖非法 summary fallback、不泄露原文、prompt/knowledge 边界、单步阶段机、单证据门槛、候选证据门槛、aggressive + evidence、build failure、TaskError、timeout 恢复 `is_processing = 0`。
+- 重跑 `cargo fmt --all -- --check` 通过；`cargo test -p daedalusd --test http_session` 26 passed；`cargo test -p daedalusd --test http_tasks` 15 passed；`cargo test -p daedalusd --test narrative_tools` 7 passed；`cargo clippy -p daedalusd --all-targets -- -D warnings` 通过；`git diff --check` 通过。
+- 结论成立：Godot 已可通过 Daedalus Session API 获得 SSE 格式的审讯结果事件流。
+
+剩余风险：
+
+- 当前 SSE 仍是“处理完成后一次性发出多个事件”的最小封装，不是 token/chunk 级实时流。
+- Godot 项目接线、真实 LLM provider smoke、Gate AutoRevision、多 NPC 状态机、复杂条件表达式仍未进入本轮。

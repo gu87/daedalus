@@ -302,6 +302,32 @@ async fn send_message(
     (status, body)
 }
 
+async fn send_message_stream(
+    addr: &str,
+    session_id: &str,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, String, String) {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/session/{session_id}/message/stream"
+        ))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = resp.text().await.unwrap();
+    (status, content_type, body)
+}
+
 async fn get_state(addr: &str, session_id: &str) -> serde_json::Value {
     let resp = reqwest::get(format!("http://{addr}/api/session/{session_id}/state"))
         .await
@@ -440,6 +466,132 @@ async fn message_uses_fake_agent_loop_utterance_and_updates_state() {
         json!(["photo_1", "note_1"])
     );
     assert!(!session_processing(&db_path, session_id));
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn stream_message_returns_sse_events_with_stage_and_clue_changes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(
+                r#"{"utterance":"[fake-loop] 我愿意再说一点。","emotion":"anxious","stage_delta":{"should_change":true,"new_stage":"vague","reason":"photo_matched"},"reveals":["photo_1"],"debug_tags":[],"confidence":0.7}"#
+                    .into(),
+            ),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session_with_game_state(
+        &addr,
+        json!({
+            "case_id": "wujing_fenhen",
+            "unlocked_evidence_ids": [],
+            "stage_requirements": {
+                "vague": {
+                    "required_evidence_id": "photo_1"
+                }
+            },
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+    )
+    .await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, content_type, body) = send_message_stream(
+        &addr,
+        session_id,
+        json!({"player_text": "看清楚这张照片。", "evidence_id": "photo_1", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert!(content_type.starts_with("text/event-stream"));
+    assert!(body.contains("event: utterance_complete"));
+    assert!(body.contains(r#""full_text":"[fake-loop] 我愿意再说一点。""#));
+    assert!(body.contains("event: stage_change"));
+    assert!(body.contains(r#""old_stage":"denial""#));
+    assert!(body.contains(r#""new_stage":"vague""#));
+    assert!(body.contains(r#""reason":"photo_matched""#));
+    assert!(body.contains("event: clue_unlocked"));
+    assert!(body.contains(r#""clue_id":"photo_1""#));
+    assert!(body.contains("event: done"));
+    assert!(body.contains(r#""confession_stage":"vague""#));
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(state["confession_stage"], "vague");
+    assert_eq!(state["unlocked_clues"], json!(["photo_1"]));
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn stream_message_fallback_does_not_leak_invalid_summary() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text(
+                r#"{"utterance":"不该展示","emotion":"anxious","stage_delta":{"should_change":true,"new_stage":"vague","reason":"photo_matched"},"reveals":[],"debug_tags":[],"confidence":0.7}"#
+                    .into(),
+            ),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session_with_game_state(
+        &addr,
+        json!({
+            "case_id": "wujing_fenhen",
+            "unlocked_evidence_ids": [],
+            "stage_requirements": {
+                "vague": {
+                    "required_evidence_id": "photo_1"
+                }
+            },
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+    )
+    .await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, content_type, body) = send_message_stream(
+        &addr,
+        session_id,
+        json!({"player_text": "继续说", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert!(content_type.starts_with("text/event-stream"));
+    assert!(body.contains("event: utterance_complete"));
+    assert!(body.contains(r#""full_text":"我不知道你在说什么。""#));
+    assert!(!body.contains("不该展示"));
+    assert!(!body.contains("event: stage_change"));
+    assert!(body.contains("event: done"));
+    assert!(body.contains(r#""confession_stage":"denial""#));
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(
+        state["events"][2]["payload"]["validation_error"],
+        "missing_required_evidence"
+    );
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;

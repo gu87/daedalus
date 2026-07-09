@@ -2,10 +2,13 @@ use std::fs;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{convert::Infallible, vec};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::Json;
+use futures_util::stream;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -118,6 +121,12 @@ struct PersistSessionMessageInput {
     stage_change_reason: Option<String>,
 }
 
+struct SessionMessageOutcome {
+    response: SessionMessageResponse,
+    old_confession_stage: String,
+    stage_change_reason: Option<String>,
+}
+
 pub(crate) async fn start_session(
     State(state): State<Arc<HttpState>>,
     Json(body): Json<StartSessionRequest>,
@@ -203,6 +212,69 @@ pub(crate) async fn message_session(
     Path(session_id): Path<String>,
     Json(body): Json<SessionMessageRequest>,
 ) -> Result<Json<SessionMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let outcome = handle_session_message(state, session_id, body).await?;
+    Ok(Json(outcome.response))
+}
+
+pub(crate) async fn stream_session_message(
+    State(state): State<Arc<HttpState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<SessionMessageRequest>,
+) -> Result<
+    Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let outcome = handle_session_message(state, session_id, body).await?;
+    let mut events = vec![sse_event(
+        "utterance_complete",
+        serde_json::json!({
+            "session_id": outcome.response.session_id,
+            "npc_id": outcome.response.npc_id,
+            "full_text": outcome.response.utterance,
+            "emotion": outcome.response.emotion,
+        }),
+    )];
+
+    if outcome.old_confession_stage != outcome.response.confession_stage {
+        events.push(sse_event(
+            "stage_change",
+            serde_json::json!({
+                "session_id": outcome.response.session_id,
+                "old_stage": outcome.old_confession_stage,
+                "new_stage": outcome.response.confession_stage,
+                "reason": outcome.stage_change_reason,
+            }),
+        ));
+    }
+
+    for clue_id in &outcome.response.revealed_clues {
+        events.push(sse_event(
+            "clue_unlocked",
+            serde_json::json!({
+                "session_id": outcome.response.session_id,
+                "clue_id": clue_id,
+            }),
+        ));
+    }
+
+    events.push(sse_event(
+        "done",
+        serde_json::json!({
+            "session_id": outcome.response.session_id,
+            "confession_stage": outcome.response.confession_stage,
+        }),
+    ));
+
+    Ok(Sse::new(stream::iter(
+        events.into_iter().map(Ok::<_, Infallible>),
+    )))
+}
+
+async fn handle_session_message(
+    state: Arc<HttpState>,
+    session_id: String,
+    body: SessionMessageRequest,
+) -> Result<SessionMessageOutcome, (StatusCode, Json<ErrorResponse>)> {
     let player_text = body.player_text.trim().to_string();
     if player_text.is_empty() {
         return Err(to_http_error(SessionError::BadRequest(
@@ -343,12 +415,18 @@ pub(crate) async fn message_session(
     .map_err(|_| to_http_error(SessionError::Internal("spawn_blocking panic".into())))?;
 
     match response {
-        Ok(response) => Ok(Json(response)),
+        Ok(response) => Ok(response),
         Err(err) => {
             reset_processing_after_error(&state.db_path, &session_id).await?;
             Err(to_http_error(err))
         }
     }
+}
+
+fn sse_event(event: &str, payload: Value) -> Event {
+    Event::default()
+        .event(event)
+        .data(serde_json::to_string(&payload).expect("SSE payload must serialize"))
 }
 
 async fn reset_processing_after_error(
@@ -640,7 +718,7 @@ fn reply_from_task_summary(
 fn persist_session_message(
     db_path: &std::path::Path,
     input: PersistSessionMessageInput,
-) -> Result<SessionMessageResponse, SessionError> {
+) -> Result<SessionMessageOutcome, SessionError> {
     for attempt in 0..10 {
         match persist_session_message_once(db_path, &input) {
             Err(SessionError::Internal(message))
@@ -658,7 +736,7 @@ fn persist_session_message(
 fn persist_session_message_once(
     db_path: &std::path::Path,
     input: &PersistSessionMessageInput,
-) -> Result<SessionMessageResponse, SessionError> {
+) -> Result<SessionMessageOutcome, SessionError> {
     let mut conn = crate::db::pool::open(db_path).map_err(internal)?;
     conn.busy_timeout(Duration::from_millis(500))
         .map_err(internal)?;
@@ -770,13 +848,17 @@ fn persist_session_message_once(
     }
     tx.commit().map_err(internal)?;
 
-    Ok(SessionMessageResponse {
-        session_id: input.session_id.clone(),
-        npc_id: input.npc_id.clone(),
-        utterance: input.reply.utterance.clone(),
-        emotion: input.reply.emotion.clone(),
-        confession_stage: input.reply.confession_stage.clone(),
-        revealed_clues: input.reply.revealed_clues.clone(),
+    Ok(SessionMessageOutcome {
+        response: SessionMessageResponse {
+            session_id: input.session_id.clone(),
+            npc_id: input.npc_id.clone(),
+            utterance: input.reply.utterance.clone(),
+            emotion: input.reply.emotion.clone(),
+            confession_stage: input.reply.confession_stage.clone(),
+            revealed_clues: input.reply.revealed_clues.clone(),
+        },
+        old_confession_stage: input.old_confession_stage.clone(),
+        stage_change_reason: input.stage_change_reason.clone(),
     })
 }
 
