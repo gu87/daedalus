@@ -100,6 +100,9 @@ struct SessionReply {
     emotion: String,
     confession_stage: String,
     revealed_clues: Vec<String>,
+    validation_status: String,
+    validation_error: Option<String>,
+    stage_change_reason: Option<String>,
 }
 
 struct PersistSessionMessageInput {
@@ -288,19 +291,29 @@ pub(crate) async fn message_session(
         emotion: "defensive".into(),
         confession_stage: default_confession_stage.clone(),
         revealed_clues: default_revealed_clues.clone(),
+        validation_status: "fallback".into(),
+        validation_error: None,
+        stage_change_reason: None,
     };
-    let reply = reply_from_task_summary(summary, default_reply);
+    let reply = reply_from_task_summary(
+        &summary,
+        &snapshot.game_state,
+        body.evidence_id.as_deref(),
+        default_reply,
+    );
     let stage_change_reason = if reply.confession_stage != snapshot.confession_stage {
-        if reply.confession_stage == default_confession_stage
-            && pressure_level == "aggressive"
-            && snapshot.confession_stage == "denial"
-        {
-            "aggressive_pressure"
-        } else {
-            "agent_output"
-        }
+        reply.stage_change_reason.clone().or_else(|| {
+            if reply.confession_stage == default_confession_stage
+                && pressure_level == "aggressive"
+                && snapshot.confession_stage == "denial"
+            {
+                Some("aggressive_pressure".into())
+            } else {
+                Some("agent_output".into())
+            }
+        })
     } else {
-        ""
+        None
     };
 
     let db_path = state.db_path.clone();
@@ -318,11 +331,7 @@ pub(crate) async fn message_session(
                 evidence_id: body.evidence_id,
                 pressure_level,
                 reply,
-                stage_change_reason: if stage_change_reason.is_empty() {
-                    None
-                } else {
-                    Some(stage_change_reason.to_string())
-                },
+                stage_change_reason,
             },
         )
     })
@@ -559,8 +568,15 @@ fn build_session_task_dispatch(
             output_contract: serde_json::json!({
                 "summary_shape": {
                     "utterance": "string",
-                    "emotion": "string optional",
-                    "confession_stage": "string optional"
+                    "emotion": "enum(calm|defensive|nervous|anxious|angry|broken)",
+                    "stage_delta": {
+                        "should_change": "bool",
+                        "new_stage": "null|string",
+                        "reason": "null|string"
+                    },
+                    "reveals": "string[]",
+                    "debug_tags": "string[] optional",
+                    "confidence": "number 0..=1"
                 }
             }),
             review_gate_criteria: serde_json::json!({}),
@@ -568,47 +584,31 @@ fn build_session_task_dispatch(
     }
 }
 
-fn reply_from_task_summary(summary: String, default_reply: SessionReply) -> SessionReply {
-    let trimmed = summary.trim();
-    if trimmed.is_empty() {
-        return default_reply;
-    }
-
-    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if let Some(object) = value.as_object() {
-            let utterance = object
-                .get("utterance")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or(default_reply.utterance);
-            let emotion = object
-                .get("emotion")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or(default_reply.emotion);
-            let confession_stage = object
-                .get("confession_stage")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or(default_reply.confession_stage);
-            return SessionReply {
-                utterance,
-                emotion,
-                confession_stage,
-                revealed_clues: default_reply.revealed_clues,
-            };
-        }
-    }
-
-    SessionReply {
-        utterance: trimmed.to_string(),
-        ..default_reply
+fn reply_from_task_summary(
+    summary: &str,
+    game_state: &Value,
+    request_evidence_id: Option<&str>,
+    default_reply: SessionReply,
+) -> SessionReply {
+    match validate_task_summary(summary, game_state, request_evidence_id) {
+        Ok(validated) => SessionReply {
+            utterance: validated.utterance,
+            emotion: validated.emotion,
+            confession_stage: validated
+                .confession_stage
+                .unwrap_or(default_reply.confession_stage),
+            revealed_clues: merge_revealed_clues(
+                &default_reply.revealed_clues,
+                &validated.revealed_clues,
+            ),
+            validation_status: "validated".into(),
+            validation_error: None,
+            stage_change_reason: validated.stage_change_reason,
+        },
+        Err(err) => SessionReply {
+            validation_error: Some(err.code().into()),
+            ..default_reply
+        },
     }
 }
 
@@ -724,10 +724,12 @@ fn persist_session_message_once(
             "emotion": input.reply.emotion.clone(),
             "confession_stage": input.reply.confession_stage.clone(),
             "revealed_clues": input.reply.revealed_clues.clone(),
+            "validation_status": input.reply.validation_status.clone(),
+            "validation_error": input.reply.validation_error.clone(),
         }),
         now,
     )?;
-    if let Some(clue_id) = unlocked_clue {
+    if let Some(first_clue_id) = input.reply.revealed_clues.first() {
         insert_game_event(
             &tx,
             &input.session_id,
@@ -735,7 +737,8 @@ fn persist_session_message_once(
             serde_json::json!({
                 "session_id": input.session_id,
                 "npc_id": input.npc_id,
-                "clue_id": clue_id,
+                "clue_id": first_clue_id,
+                "clue_ids": input.reply.revealed_clues.clone(),
             }),
             now,
         )?;
@@ -798,12 +801,12 @@ fn derive_unlocked_clues(events: &[GameEventResponse]) -> Vec<String> {
         }
 
         if let Some(clue_id) = event.payload.get("clue_id").and_then(Value::as_str) {
-            clues.push(clue_id.to_string());
+            push_unique(&mut clues, clue_id);
         }
         if let Some(clue_ids) = event.payload.get("clue_ids").and_then(Value::as_array) {
             for clue_id in clue_ids {
                 if let Some(clue_id) = clue_id.as_str() {
-                    clues.push(clue_id.to_string());
+                    push_unique(&mut clues, clue_id);
                 }
             }
         }
@@ -882,6 +885,238 @@ fn deterministic_utterance(confession_stage: &str) -> String {
         _ => "我需要再想想。",
     }
     .into()
+}
+
+struct ValidatedNarrativeReply {
+    utterance: String,
+    emotion: String,
+    confession_stage: Option<String>,
+    stage_change_reason: Option<String>,
+    revealed_clues: Vec<String>,
+}
+
+struct NarrativeValidationError(&'static str);
+
+impl NarrativeValidationError {
+    fn code(&self) -> &'static str {
+        self.0
+    }
+}
+
+fn validate_task_summary(
+    summary: &str,
+    game_state: &Value,
+    request_evidence_id: Option<&str>,
+) -> Result<ValidatedNarrativeReply, NarrativeValidationError> {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return Err(NarrativeValidationError("summary_not_json_object"));
+    }
+
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(|_| NarrativeValidationError("summary_not_json_object"))?;
+    if contains_forbidden_field(&value) {
+        return Err(NarrativeValidationError("forbidden_field"));
+    }
+    let object = value
+        .as_object()
+        .ok_or(NarrativeValidationError("summary_not_json_object"))?;
+    validate_keys(
+        object.keys().map(String::as_str),
+        &[
+            "utterance",
+            "emotion",
+            "stage_delta",
+            "reveals",
+            "debug_tags",
+            "confidence",
+        ],
+    )?;
+
+    let utterance = object
+        .get("utterance")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(NarrativeValidationError("invalid_utterance"))?;
+    if utterance.chars().count() > 500 {
+        return Err(NarrativeValidationError("invalid_utterance"));
+    }
+    if utterance_contains_forbidden_term(utterance, game_state) {
+        return Err(NarrativeValidationError("forbidden_term"));
+    }
+
+    let emotion = object
+        .get("emotion")
+        .and_then(Value::as_str)
+        .filter(|emotion| {
+            matches!(
+                *emotion,
+                "calm" | "defensive" | "nervous" | "anxious" | "angry" | "broken"
+            )
+        })
+        .ok_or(NarrativeValidationError("invalid_emotion"))?;
+
+    let stage_delta = object
+        .get("stage_delta")
+        .and_then(Value::as_object)
+        .ok_or(NarrativeValidationError("invalid_stage_delta"))?;
+    validate_keys(
+        stage_delta.keys().map(String::as_str),
+        &["should_change", "new_stage", "reason"],
+    )?;
+
+    let should_change = stage_delta
+        .get("should_change")
+        .and_then(Value::as_bool)
+        .ok_or(NarrativeValidationError("invalid_stage_delta"))?;
+    let (confession_stage, stage_change_reason) = if should_change {
+        let new_stage = stage_delta
+            .get("new_stage")
+            .and_then(Value::as_str)
+            .filter(|stage| matches!(*stage, "denial" | "vague" | "partial" | "breakdown"))
+            .ok_or(NarrativeValidationError("invalid_stage_delta"))?;
+        let reason = stage_delta
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(NarrativeValidationError("invalid_stage_delta"))?;
+        (Some(new_stage.to_string()), Some(reason.to_string()))
+    } else {
+        if stage_delta
+            .get("new_stage")
+            .is_some_and(|value| !value.is_null())
+            || stage_delta
+                .get("reason")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Err(NarrativeValidationError("invalid_stage_delta"));
+        }
+        (None, None)
+    };
+
+    let reveals = object
+        .get("reveals")
+        .and_then(Value::as_array)
+        .ok_or(NarrativeValidationError("invalid_reveal"))?;
+    let mut revealed_clues = Vec::with_capacity(reveals.len());
+    for reveal in reveals {
+        let clue_id = reveal
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(NarrativeValidationError("invalid_reveal"))?;
+        if !is_allowed_reveal(clue_id, game_state, request_evidence_id) {
+            return Err(NarrativeValidationError("invalid_reveal"));
+        }
+        revealed_clues.push(clue_id.to_string());
+    }
+
+    if let Some(debug_tags) = object.get("debug_tags") {
+        let debug_tags = debug_tags
+            .as_array()
+            .ok_or(NarrativeValidationError("invalid_debug_tag"))?;
+        for tag in debug_tags {
+            let tag = tag
+                .as_str()
+                .filter(|tag| {
+                    matches!(
+                        *tag,
+                        "withholding_known_fact"
+                            | "nervous_pause"
+                            | "contradiction_pressure"
+                            | "evidence_reaction"
+                            | "fallback"
+                    )
+                })
+                .ok_or(NarrativeValidationError("invalid_debug_tag"))?;
+            let _ = tag;
+        }
+    }
+
+    let confidence = object
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .ok_or(NarrativeValidationError("invalid_confidence"))?;
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err(NarrativeValidationError("invalid_confidence"));
+    }
+
+    Ok(ValidatedNarrativeReply {
+        utterance: utterance.to_string(),
+        emotion: emotion.to_string(),
+        confession_stage,
+        stage_change_reason,
+        revealed_clues,
+    })
+}
+
+fn contains_forbidden_field(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "inner_thought" | "chain_of_thought" | "forbidden_leak"
+            ) || contains_forbidden_field(value)
+        }),
+        Value::Array(items) => items.iter().any(contains_forbidden_field),
+        _ => false,
+    }
+}
+
+fn validate_keys<'a>(
+    keys: impl Iterator<Item = &'a str>,
+    allowed: &[&str],
+) -> Result<(), NarrativeValidationError> {
+    for key in keys {
+        if !allowed.contains(&key) {
+            return Err(NarrativeValidationError("invalid_field"));
+        }
+    }
+    Ok(())
+}
+
+fn utterance_contains_forbidden_term(utterance: &str, game_state: &Value) -> bool {
+    game_state
+        .get("forbidden_terms")
+        .and_then(Value::as_array)
+        .is_some_and(|terms| {
+            terms.iter().filter_map(Value::as_str).any(|term| {
+                let term = term.trim();
+                !term.is_empty() && utterance.contains(term)
+            })
+        })
+}
+
+fn is_allowed_reveal(clue_id: &str, game_state: &Value, request_evidence_id: Option<&str>) -> bool {
+    if request_evidence_id.is_some_and(|evidence_id| evidence_id.trim() == clue_id) {
+        return true;
+    }
+
+    game_state
+        .get("unlocked_evidence_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|clues| {
+            clues
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|item| item == clue_id)
+        })
+}
+
+fn merge_revealed_clues(default_clues: &[String], validated_clues: &[String]) -> Vec<String> {
+    let mut merged = default_clues.to_vec();
+    for clue_id in validated_clues {
+        push_unique(&mut merged, clue_id);
+    }
+    merged
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
 }
 
 fn now_unix() -> i64 {
