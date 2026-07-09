@@ -39,3 +39,5 @@
 
 - 当前阶段跳转约束仍是 Phase 2c 的最小 validator 规则，只覆盖单步前进，不处理更复杂的剧情条件、证据门槛或多 NPC 状态机。
 - `/Users/gu/daedalus-courtroom-demo` 当前仍是既有脏工作树；本次未修改该仓库，也未见本轮后端 diff 落入其中，但无法仅凭当前状态证明其中既有改动与本轮绝对无关。
+
+[2026-07-09 13:50 +0800] [reviewer] PASS - Narrative Backend Phase 2c 限制 LLM 口供阶段跳转验收通过：只读复核 work/task.md、当前工作树与实际 diff；重跑 cargo fmt --all -- --check、cargo test -p daedalusd --test http_session、cargo test -p daedalusd --test http_tasks、cargo test -p daedalusd --test narrative_tools、cargo clippy -p daedalusd --all-targets -- -D warnings、git diff --check 全部通过。测试已证明合法单步 stage_delta 可推进并写入 reason，跳级和同阶段伪变化会以 invalid_stage_transition fallback 且不更新 session stage。非阻断风险：当前仍是 Phase 2c 最小 validator 规则，不覆盖复杂剧情条件或多 NPC 状态机；timeout 集成测试仍按真实 30 秒等待。
