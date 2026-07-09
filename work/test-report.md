@@ -116,3 +116,43 @@
 
 - 当前仍是 Phase 2e 最小 validator 规则，只支持单次 request `evidence_id` 命中旧字段或候选数组中的任一项，不覆盖多证据同时满足或更复杂条件表达式。
 - `timeout` 集成测试仍按真实 30 秒等待。
+
+[2026-07-09 16:07 +0800] Phase 2 completion developer 审计：
+
+- `git fetch origin`：通过
+- 分支确认：当前分支 `codex/narrative-backend`
+- commit 确认：当前分支包含 `b87f6bc chore: dispatch narrative phase 2 completion audit`
+- commit 确认：当前分支包含 `b237b38 feat: allow candidate evidence for narrative stage gates`
+- `cargo fmt --all -- --check`：通过
+- `cargo test -p daedalusd --test http_session`：24 passed
+- `cargo test -p daedalusd --test http_tasks`：15 passed
+- `cargo test -p daedalusd --test narrative_tools`：7 passed
+- `cargo clippy -p daedalusd --all-targets -- -D warnings`：通过
+- `git diff --check`：通过
+
+结论：
+
+- Daedalus Narrative Backend Phase 2 已完成：结构化 NPC 输出、prompt/knowledge 边界、单步阶段机、证据门槛、候选证据门槛均已实现并通过回归。
+- Phase 2a-2e 能力在当前分支上仍可验证：非法 summary / 非法字段 / forbidden term / invalid reveal 会 fallback 且不泄露原文；prompt 注入输出契约、当前 session 状态与 knowledge 边界；`stage_delta` 仅允许 `denial -> vague -> partial -> breakdown` 单步推进；`required_evidence_id` 与 `required_evidence_ids` 都能约束阶段推进且错误证据返回稳定 `missing_required_evidence`。
+- 本轮未做业务代码改动；按任务卡只更新了 `work/test-report.md` 与 `work/callbacks.md`，未修改 `/Users/gu/daedalus-courtroom-demo`。
+
+剩余风险：
+
+- Phase 3 事项仍未进入本轮：SSE / Godot 接入、真实 LLM provider smoke、Gate AutoRevision、多 NPC 状态机、多证据同时满足、复杂条件表达式、timeout 测试加速。
+- `timeout` 集成测试仍按真实约 30 秒等待，但不阻断 Phase 2 completion。
+
+## Reviewer 验收
+
+[2026-07-09 16:14 +0800] PASS
+
+- 只读复核 `work/task.md`、当前工作树与实际 diff；本轮 completion audit 未见任何 `daedalusd/src/**`、`daedalusd/tests/**` 或 `/Users/gu/daedalus-courtroom-demo` 改动，当前未提交 diff 仅落在 `work/test-report.md` 与 `work/callbacks.md`，工作树中的 `.codex/agents/*.md`、`AGENTS.md`、`work/registry.md` 为既有协作脏改动，未作为本轮业务 diff 阻断。
+- `git log --oneline` 已确认当前分支 `codex/narrative-backend` 包含 `b87f6bc chore: dispatch narrative phase 2 completion audit` 与 `b237b38 feat: allow candidate evidence for narrative stage gates`，满足任务卡的分支/完成定义前提。
+- 当前 Phase 2a-2e 能力仍可由现有测试矩阵覆盖：`http_session` 24 passed，继续覆盖非法 summary fallback、不泄露原文、prompt/knowledge 边界、单步阶段机、单证据门槛、候选证据门槛、aggressive + evidence、build failure、TaskError、timeout 恢复 `is_processing = 0`。
+- `http_tasks` 15 passed、`narrative_tools` 7 passed、`cargo clippy -p daedalusd --all-targets -- -D warnings` 通过，说明本轮在不改业务代码的前提下，Phase 2 回归状态保持稳定。
+- 重跑 `cargo fmt --all -- --check` 通过；`cargo test -p daedalusd --test http_session` 24 passed；`cargo test -p daedalusd --test http_tasks` 15 passed；`cargo test -p daedalusd --test narrative_tools` 7 passed；`cargo clippy -p daedalusd --all-targets -- -D warnings` 通过；`git diff --check` 通过。
+- 结论成立：Daedalus Narrative Backend Phase 2 已完成，结构化 NPC 输出、prompt/knowledge 边界、单步阶段机、证据门槛、候选证据门槛均已实现并通过回归。
+
+剩余风险：
+
+- Phase 3 范围仍未进入本轮：SSE / Godot 接入、真实 LLM provider smoke、Gate AutoRevision、多 NPC 状态机、多证据同时满足、复杂条件表达式。
+- `timeout` 集成测试仍按真实约 30 秒等待，但不阻断 Phase 2 completion。
