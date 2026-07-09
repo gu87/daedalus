@@ -7,6 +7,7 @@ pub mod gate;
 pub mod http;
 pub mod ipc;
 pub mod llm;
+pub mod narrative;
 pub mod pipeline;
 pub mod run_artifacts;
 pub mod tools;
