@@ -7,6 +7,7 @@
 use serde::Deserialize;
 
 use crate::error::DaedalusError;
+use crate::narrative::knowledge;
 use crate::types::TaskCard;
 
 // ── SourceProvider trait ──────────────────────────────────────────────
@@ -293,6 +294,52 @@ impl SourceProvider for AgentConfigProvider {
             config.permission
         );
         Ok(Some(section))
+    }
+}
+
+// ── CharacterKnowledgeProvider ────────────────────────────────────────
+
+pub struct CharacterKnowledgeProvider {
+    narrative_root: std::path::PathBuf,
+}
+
+impl CharacterKnowledgeProvider {
+    pub fn new(narrative_root: &std::path::Path) -> Self {
+        Self {
+            narrative_root: narrative_root.to_path_buf(),
+        }
+    }
+}
+
+impl SourceProvider for CharacterKnowledgeProvider {
+    fn label(&self) -> &str {
+        "character_knowledge"
+    }
+
+    fn provide(&self, agent_id: &str, task: &TaskCard) -> Result<Option<String>, DaedalusError> {
+        let Some(confession_stage) = task
+            .compiled_intent
+            .get("current_confession_stage")
+            .or_else(|| {
+                task.context
+                    .project_context
+                    .data
+                    .get("current_confession_stage")
+            })
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(None);
+        };
+        let npc_id = task
+            .compiled_intent
+            .get("npc_id")
+            .or_else(|| task.context.project_context.data.get("npc_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(agent_id);
+        let snapshot = knowledge::prompt_snapshot(&self.narrative_root, npc_id, confession_stage);
+        Ok(Some(
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+        ))
     }
 }
 

@@ -46,6 +46,9 @@ impl PromptBuilder {
             Box::new(prompt_sources::AgentConfigProvider::new(
                 &config.managed_agents_path,
             )),
+            Box::new(prompt_sources::CharacterKnowledgeProvider::new(
+                &crate::narrative::knowledge::root_from_config(&config),
+            )),
             Box::new(prompt_sources::FeedbackProvider::new(&mp.feedback)),
             Box::new(prompt_sources::ProjectContextProvider::new(
                 &mp.project_context,

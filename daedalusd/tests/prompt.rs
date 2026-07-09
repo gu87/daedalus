@@ -4,9 +4,9 @@ use std::sync::Mutex;
 
 use daedalusd::agent::prompt::PromptBuilder;
 use daedalusd::agent::prompt_sources::{
-    AgentConfigProvider, AuthorityMapProvider, DaedalusMdProvider, FeedbackProvider, MemoryPaths,
-    MemoryProvider, PreferencesProvider, ProjectContextProvider, SkillsProvider, SoulProvider,
-    SourceProvider, UserProvider,
+    AgentConfigProvider, AuthorityMapProvider, CharacterKnowledgeProvider, DaedalusMdProvider,
+    FeedbackProvider, MemoryPaths, MemoryProvider, PreferencesProvider, ProjectContextProvider,
+    SkillsProvider, SoulProvider, SourceProvider, UserProvider,
 };
 use daedalusd::config::DaedalusConfig;
 use daedalusd::types::{TaskCard, TaskContext};
@@ -71,6 +71,21 @@ fn dummy_task() -> TaskCard {
         output_contract: serde_json::json!({}),
         review_gate_criteria: serde_json::json!({}),
     }
+}
+
+fn narrative_task(stage: &str) -> TaskCard {
+    let mut task = dummy_task();
+    task.project = "narrative-session".into();
+    task.compiled_intent = serde_json::json!({
+        "npc_id": "zhang_san",
+        "current_confession_stage": stage,
+    });
+    task.context.project_context.name = "narrative-session".into();
+    task.context.project_context.data = serde_json::json!({
+        "npc_id": "zhang_san",
+        "current_confession_stage": stage,
+    });
+    task
 }
 
 fn write_file(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
@@ -379,6 +394,52 @@ fn agent_config_provider_missing_agent_is_err() {
     let p = AgentConfigProvider::new(&path);
     let result = p.provide("test-agent", &dummy_task());
     assert!(result.is_err());
+}
+
+#[test]
+fn character_knowledge_provider_skips_non_narrative_tasks() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let p = CharacterKnowledgeProvider::new(dir.path());
+
+    let result = p.provide("zhang_san", &dummy_task()).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn character_knowledge_provider_injects_visible_facts_without_hidden_content() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let character_dir = dir.path().join("narrative/characters/zhang_san");
+    std::fs::create_dir_all(&character_dir).unwrap();
+    std::fs::write(
+        character_dir.join("knowledge.yaml"),
+        r#"npc_id: zhang_san
+knows:
+  - fact_id: liang_is_neighbor
+    content: "梁远山是我的邻居。"
+  - fact_id: saw_luggage
+    content: "梁远山11月3日晚上带着行李出门了。"
+    unlock_condition: "stage >= vague"
+hides:
+  - fact_id: helped_cover
+    content: "我帮忙处理了现场。"
+    reveal_stage: breakdown
+"#,
+    )
+    .unwrap();
+    let p = CharacterKnowledgeProvider::new(dir.path());
+
+    let result = p
+        .provide("zhang_san", &narrative_task("denial"))
+        .unwrap()
+        .unwrap();
+    assert!(result.contains("liang_is_neighbor"));
+    assert!(result.contains("梁远山是我的邻居。"));
+    assert!(result.contains("saw_luggage"));
+    assert!(result.contains("vague"));
+    assert!(!result.contains("梁远山11月3日晚上带着行李出门了。"));
+    assert!(result.contains("helped_cover"));
+    assert!(result.contains("breakdown"));
+    assert!(!result.contains("我帮忙处理了现场。"));
 }
 
 // ── full chain via PromptBuilder ──────────────────────────────────────
