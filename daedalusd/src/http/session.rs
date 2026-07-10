@@ -86,6 +86,7 @@ enum SessionError {
     BadRequest(String),
     NotFound(String),
     Conflict(String),
+    Gone(String),
     Internal(String),
 }
 
@@ -223,6 +224,7 @@ pub(crate) async fn stream_session_message(
     Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
+    ensure_session_can_message(&state.db_path, &session_id).await?;
     let (sse_tx, sse_rx) = mpsc::channel::<Event>(16);
     tokio::spawn(async move {
         match handle_session_message(state, session_id, body, Some(sse_tx.clone())).await {
@@ -263,6 +265,18 @@ pub(crate) async fn stream_session_message(
             .await
             .map(|event| (Ok::<_, Infallible>(event), rx))
     })))
+}
+
+pub(crate) async fn end_session(
+    State(state): State<Arc<HttpState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let db_path = state.db_path.clone();
+    tokio::task::spawn_blocking(move || end_session_once(&db_path, &session_id))
+        .await
+        .map_err(|_| to_http_error(SessionError::Internal("spawn_blocking panic".into())))?
+        .map(Json)
+        .map_err(to_http_error)
 }
 
 async fn handle_session_message(
@@ -429,6 +443,31 @@ async fn handle_session_message(
     }
 }
 
+async fn ensure_session_can_message(
+    db_path: &std::path::Path,
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let db_path = db_path.to_path_buf();
+    let session_id = session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::db::pool::open(&db_path).map_err(internal)?;
+        if !session_exists(&conn, &session_id)? {
+            return Err(SessionError::NotFound(format!(
+                "session not found: {session_id}"
+            )));
+        }
+        if session_has_end_event(&conn, &session_id)? {
+            return Err(SessionError::Gone(format!(
+                "session has ended: {session_id}"
+            )));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| to_http_error(SessionError::Internal("spawn_blocking panic".into())))?
+    .map_err(to_http_error)
+}
+
 async fn run_session_task(
     state: &Arc<HttpState>,
     session_id: &str,
@@ -559,71 +598,7 @@ pub(crate) async fn get_session_state(
     let db_path = state.db_path.clone();
     let result = tokio::task::spawn_blocking(move || {
         let conn = crate::db::pool::open(&db_path).map_err(internal)?;
-        let row = conn
-            .query_row(
-                "SELECT session_id, npc_id, case_id, confession_stage, game_state_json,
-                        messages_jsonl, is_processing, created_at, updated_at
-                 FROM sessions WHERE session_id = ?1",
-                params![session_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, i64>(8)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(internal)?;
-
-        let Some((
-            session_id,
-            npc_id,
-            case_id,
-            confession_stage,
-            game_state_json,
-            messages_jsonl,
-            is_processing,
-            created_at,
-            updated_at,
-        )) = row
-        else {
-            return Err(SessionError::NotFound(format!(
-                "session not found: {session_id}"
-            )));
-        };
-        let messages = parse_jsonl(&messages_jsonl)?;
-        let events = load_game_events(&conn, &session_id)?;
-        let derived_state = narrative_state::derive_session_state(
-            &messages,
-            events.iter().map(|event| narrative_state::EventView {
-                event_type: &event.event_type,
-                payload: &event.payload,
-            }),
-        );
-
-        Ok::<SessionStateResponse, SessionError>(SessionStateResponse {
-            session_id,
-            npc_id,
-            case_id,
-            confession_stage,
-            emotional_state: derived_state.emotional_state,
-            turn_count: derived_state.turn_count,
-            unlocked_clues: derived_state.unlocked_clues,
-            game_state: serde_json::from_str(&game_state_json).map_err(internal)?,
-            messages,
-            events,
-            is_processing: is_processing != 0,
-            is_ended: derived_state.is_ended,
-            created_at,
-            updated_at,
-        })
+        build_session_state_response(&conn, &session_id)
     })
     .await
     .map_err(|_| to_http_error(SessionError::Internal("spawn_blocking panic".into())))?
@@ -641,6 +616,77 @@ fn append_jsonl(mut lines: String, value: Value) -> Result<String, SessionError>
     Ok(lines)
 }
 
+fn build_session_state_response(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<SessionStateResponse, SessionError> {
+    let row = conn
+        .query_row(
+            "SELECT session_id, npc_id, case_id, confession_stage, game_state_json,
+                    messages_jsonl, is_processing, created_at, updated_at
+             FROM sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+
+    let Some((
+        session_id,
+        npc_id,
+        case_id,
+        confession_stage,
+        game_state_json,
+        messages_jsonl,
+        is_processing,
+        created_at,
+        updated_at,
+    )) = row
+    else {
+        return Err(SessionError::NotFound(format!(
+            "session not found: {session_id}"
+        )));
+    };
+    let messages = parse_jsonl(&messages_jsonl)?;
+    let events = load_game_events(conn, &session_id)?;
+    let derived_state = narrative_state::derive_session_state(
+        &messages,
+        events.iter().map(|event| narrative_state::EventView {
+            event_type: &event.event_type,
+            payload: &event.payload,
+        }),
+    );
+
+    Ok(SessionStateResponse {
+        session_id,
+        npc_id,
+        case_id,
+        confession_stage,
+        emotional_state: derived_state.emotional_state,
+        turn_count: derived_state.turn_count,
+        unlocked_clues: derived_state.unlocked_clues,
+        game_state: serde_json::from_str(&game_state_json).map_err(internal)?,
+        messages,
+        events,
+        is_processing: is_processing != 0,
+        is_ended: derived_state.is_ended,
+        created_at,
+        updated_at,
+    })
+}
+
 fn load_session_for_message(
     db_path: &std::path::Path,
     session_id: &str,
@@ -649,6 +695,42 @@ fn load_session_for_message(
     conn.busy_timeout(Duration::from_millis(500))
         .map_err(internal)?;
     let tx = conn.transaction().map_err(internal)?;
+    let row = tx
+        .query_row(
+            "SELECT npc_id, case_id, confession_stage, game_state_json, messages_jsonl, is_processing
+             FROM sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((npc_id, case_id, confession_stage, game_state_json, messages_jsonl, is_processing)) =
+        row
+    else {
+        return Err(SessionError::NotFound(format!(
+            "session not found: {session_id}"
+        )));
+    };
+    if is_processing != 0 {
+        return Err(SessionError::Conflict(format!(
+            "session is already processing: {session_id}"
+        )));
+    }
+    if session_has_end_event(&tx, session_id)? {
+        return Err(SessionError::Gone(format!(
+            "session has ended: {session_id}"
+        )));
+    }
+
     let now = now_unix();
     let changed = tx
         .execute(
@@ -657,46 +739,11 @@ fn load_session_for_message(
             params![now, session_id],
         )
         .map_err(internal)?;
-
     if changed == 0 {
-        let exists: bool = tx
-            .prepare("SELECT 1 FROM sessions WHERE session_id = ?1")
-            .map_err(internal)?
-            .exists(params![session_id])
-            .map_err(internal)?;
-        return if exists {
-            Err(SessionError::Conflict(format!(
-                "session is already processing: {session_id}"
-            )))
-        } else {
-            Err(SessionError::NotFound(format!(
-                "session not found: {session_id}"
-            )))
-        };
+        return Err(SessionError::Conflict(format!(
+            "session is already processing: {session_id}"
+        )));
     }
-
-    let (npc_id, case_id, confession_stage, game_state_json, messages_jsonl): (
-        String,
-        String,
-        String,
-        String,
-        String,
-    ) = tx
-        .query_row(
-            "SELECT npc_id, case_id, confession_stage, game_state_json, messages_jsonl
-             FROM sessions WHERE session_id = ?1",
-            params![session_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .map_err(internal)?;
     tx.commit().map_err(internal)?;
 
     Ok(SessionSnapshot {
@@ -832,6 +879,63 @@ fn persist_session_message_once(
     })
 }
 
+fn end_session_once(
+    db_path: &std::path::Path,
+    session_id: &str,
+) -> Result<SessionStateResponse, SessionError> {
+    let mut conn = crate::db::pool::open(db_path).map_err(internal)?;
+    conn.busy_timeout(Duration::from_millis(500))
+        .map_err(internal)?;
+    let now = now_unix();
+    let tx = conn.transaction().map_err(internal)?;
+    let row = tx
+        .query_row(
+            "SELECT npc_id, confession_stage, is_processing
+             FROM sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((npc_id, confession_stage, is_processing)) = row else {
+        return Err(SessionError::NotFound(format!(
+            "session not found: {session_id}"
+        )));
+    };
+    if is_processing != 0 {
+        return Err(SessionError::Conflict(format!(
+            "session is already processing: {session_id}"
+        )));
+    }
+    if session_has_end_event(&tx, session_id)? {
+        return Err(SessionError::Gone(format!(
+            "session has ended: {session_id}"
+        )));
+    }
+
+    insert_game_event(
+        &tx,
+        session_id,
+        "session_end",
+        events::session_end(session_id, &npc_id, "player_ended", &confession_stage),
+        now,
+    )?;
+    tx.execute(
+        "UPDATE sessions SET updated_at = ?1 WHERE session_id = ?2",
+        params![now, session_id],
+    )
+    .map_err(internal)?;
+    tx.commit().map_err(internal)?;
+
+    build_session_state_response(&conn, session_id)
+}
+
 fn reset_processing(db_path: &std::path::Path, session_id: &str) -> Result<(), SessionError> {
     let conn = crate::db::pool::open(db_path).map_err(internal)?;
     conn.busy_timeout(Duration::from_millis(500))
@@ -905,6 +1009,23 @@ fn load_game_events(
     Ok(events)
 }
 
+fn session_exists(conn: &rusqlite::Connection, session_id: &str) -> Result<bool, SessionError> {
+    conn.prepare("SELECT 1 FROM sessions WHERE session_id = ?1")
+        .map_err(internal)?
+        .exists(params![session_id])
+        .map_err(internal)
+}
+
+fn session_has_end_event(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<bool, SessionError> {
+    conn.prepare("SELECT 1 FROM game_events WHERE session_id = ?1 AND event_type = 'session_end'")
+        .map_err(internal)?
+        .exists(params![session_id])
+        .map_err(internal)
+}
+
 fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -922,6 +1043,7 @@ fn to_http_error(err: SessionError) -> (StatusCode, Json<ErrorResponse>) {
         SessionError::BadRequest(error) => (StatusCode::BAD_REQUEST, error),
         SessionError::NotFound(error) => (StatusCode::NOT_FOUND, error),
         SessionError::Conflict(error) => (StatusCode::CONFLICT, error),
+        SessionError::Gone(error) => (StatusCode::GONE, error),
         SessionError::Internal(error) => (StatusCode::INTERNAL_SERVER_ERROR, error),
     };
     (status, Json(ErrorResponse { error }))

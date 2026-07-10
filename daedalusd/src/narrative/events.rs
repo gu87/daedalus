@@ -16,6 +16,20 @@ pub(crate) fn session_start(
     })
 }
 
+pub(crate) fn session_end(
+    session_id: &str,
+    npc_id: &str,
+    reason: &str,
+    final_stage: &str,
+) -> Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "npc_id": npc_id,
+        "reason": reason,
+        "final_stage": final_stage,
+    })
+}
+
 pub(crate) fn player_message(
     session_id: &str,
     npc_id: &str,

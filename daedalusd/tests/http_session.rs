@@ -241,6 +241,7 @@ fn write_phase1_fixture(base: &std::path::Path) {
     std::fs::create_dir_all(base.join("config")).unwrap();
     std::fs::create_dir_all(base.join("skills")).unwrap();
     std::fs::create_dir_all(base.join("narrative/characters/zhang_san")).unwrap();
+    std::fs::create_dir_all(base.join("narrative/characters/li_si")).unwrap();
     std::fs::write(
         base.join("SOUL.md"),
         "You are Zhang San, a nervous witness under interrogation.\n",
@@ -248,12 +249,17 @@ fn write_phase1_fixture(base: &std::path::Path) {
     .unwrap();
     std::fs::write(
         base.join("config/managed-agents.yaml"),
-        "agents:\n  zhang_san:\n    role_summary: \"A nervous witness in the police station.\"\n    tools: [t1,speak,task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: fake-model\n      fallback_chain: []\n",
+        "agents:\n  zhang_san:\n    role_summary: \"A nervous witness in the police station.\"\n    tools: [t1,speak,task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: fake-model\n      fallback_chain: []\n  li_si:\n    role_summary: \"A separate witness with isolated knowledge.\"\n    tools: [t1,speak,task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: fake-model\n      fallback_chain: []\n",
     )
     .unwrap();
     std::fs::write(
         base.join("narrative/characters/zhang_san/knowledge.yaml"),
         "npc_id: zhang_san\ncase_id: wujing_fenhen\nknows:\n  - fact_id: liang_is_neighbor\n    content: \"梁远山是我的邻居。\"\n  - fact_id: saw_luggage\n    content: \"梁远山11月3日晚上带着行李出门了。\"\n    unlock_condition: \"stage >= vague\"\nhides:\n  - fact_id: helped_cover\n    content: \"我帮忙处理了现场。\"\n    reveal_stage: breakdown\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("narrative/characters/li_si/knowledge.yaml"),
+        "npc_id: li_si\ncase_id: wujing_fenhen\nknows:\n  - fact_id: li_has_receipt\n    content: \"李四保留了一张单据。\"\nhides:\n  - fact_id: li_hidden_call\n    content: \"李四隐瞒了一通电话。\"\n    reveal_stage: partial\n",
     )
     .unwrap();
 }
@@ -331,14 +337,23 @@ async fn start_session_with_game_state(
     addr: &str,
     game_state: serde_json::Value,
 ) -> serde_json::Value {
+    start_session_for_npc(addr, "zhang_san", game_state, "denial").await
+}
+
+async fn start_session_for_npc(
+    addr: &str,
+    npc_id: &str,
+    game_state: serde_json::Value,
+    initial_confession_stage: &str,
+) -> serde_json::Value {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/api/session/start"))
         .json(&json!({
-            "npc_id": "zhang_san",
+            "npc_id": npc_id,
             "scene_id": "police_office",
             "game_state": game_state,
-            "initial_confession_stage": "denial"
+            "initial_confession_stage": initial_confession_stage
         }))
         .send()
         .await
@@ -401,6 +416,18 @@ async fn send_message_stream(
         .to_string();
     let body = resp.text().await.unwrap();
     (status, content_type, body)
+}
+
+async fn end_session(addr: &str, session_id: &str) -> (reqwest::StatusCode, serde_json::Value) {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/api/session/{session_id}/end"))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.json().await.unwrap();
+    (status, body)
 }
 
 async fn get_state(addr: &str, session_id: &str) -> serde_json::Value {
@@ -467,6 +494,111 @@ async fn start_session_returns_session_id() {
     assert_eq!(state["is_ended"], false);
     assert!(state["created_at"].as_i64().is_some());
     assert!(state["updated_at"].as_i64().is_some());
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn end_session_marks_state_and_blocks_followup_messages() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Text("unused".into()),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, body) = end_session(&addr, session_id).await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["is_ended"], true);
+    assert!(body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event_type"] == "session_end"));
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(state["is_ended"], true);
+    assert_eq!(state["turn_count"], 0);
+
+    let (status, body) = end_session(&addr, session_id).await;
+    assert_eq!(status, 410, "body: {body}");
+    let (status, body) = send_message(
+        &addr,
+        session_id,
+        json!({"player_text": "还在吗？", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 410, "body: {body}");
+    let (status, _content_type, body) = send_message_stream(
+        &addr,
+        session_id,
+        json!({"player_text": "还在吗？", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 410, "body: {body}");
+
+    let (status, body) = end_session(&addr, "sess-missing").await;
+    assert_eq!(status, 404, "body: {body}");
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn end_session_returns_409_while_processing() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Hang,
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap().to_string();
+    let addr_for_message = addr.clone();
+    let session_for_message = session_id.clone();
+    let message = tokio::spawn(async move {
+        send_message(
+            &addr_for_message,
+            &session_for_message,
+            json!({"player_text": "慢慢想。", "pressure_level": "normal"}),
+        )
+        .await
+    });
+
+    for _ in 0..20 {
+        if session_processing(&db_path, &session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(session_processing(&db_path, &session_id));
+
+    let (status, body) = end_session(&addr, &session_id).await;
+    assert_eq!(status, 409, "body: {body}");
+    let (message_status, _body) = message.await.unwrap();
+    assert_eq!(message_status, 504);
+    assert!(!session_processing(&db_path, &session_id));
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -545,6 +677,118 @@ async fn message_uses_fake_agent_loop_utterance_and_updates_state() {
         json!(["photo_1", "note_1"])
     );
     assert!(!session_processing(&db_path, session_id));
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn two_npc_sessions_keep_state_history_events_and_prompts_isolated() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let summaries = Arc::new(Mutex::new(vec![
+        r#"{"utterance":"[zhang] 我愿意说一点。","emotion":"anxious","stage_delta":{"should_change":true,"new_stage":"vague","reason":"photo_matched"},"reveals":["photo_a"],"debug_tags":[],"confidence":0.8}"#.to_string(),
+        r#"{"utterance":"[li] 我只认这张单据。","emotion":"calm","stage_delta":{"should_change":false,"new_stage":null,"reason":null},"reveals":["badge_b"],"debug_tags":[],"confidence":0.8}"#.to_string(),
+    ]));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::Sequence(summaries),
+            config: config.clone(),
+            captured_messages: Some(captured.clone()),
+        }),
+        config,
+    )
+    .await;
+    let zhang = start_session_for_npc(
+        &addr,
+        "zhang_san",
+        json!({
+            "case_id": "case_a",
+            "unlocked_evidence_ids": [],
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+        "denial",
+    )
+    .await;
+    let li = start_session_for_npc(
+        &addr,
+        "li_si",
+        json!({
+            "case_id": "case_b",
+            "unlocked_evidence_ids": [],
+            "player_reputation": 10,
+            "time_pressure": 0.1
+        }),
+        "denial",
+    )
+    .await;
+    let zhang_id = zhang["session_id"].as_str().unwrap();
+    let li_id = li["session_id"].as_str().unwrap();
+
+    let (status, zhang_body) = send_message(
+        &addr,
+        zhang_id,
+        json!({"player_text": "看照片。", "evidence_id": "photo_a", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {zhang_body}");
+    let (status, li_body) = send_message(
+        &addr,
+        li_id,
+        json!({"player_text": "看单据。", "evidence_id": "badge_b", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {li_body}");
+
+    let zhang_state = get_state(&addr, zhang_id).await;
+    let li_state = get_state(&addr, li_id).await;
+    assert_eq!(zhang_state["npc_id"], "zhang_san");
+    assert_eq!(li_state["npc_id"], "li_si");
+    assert_eq!(zhang_state["case_id"], "case_a");
+    assert_eq!(li_state["case_id"], "case_b");
+    assert_eq!(zhang_state["confession_stage"], "vague");
+    assert_eq!(li_state["confession_stage"], "denial");
+    assert_eq!(zhang_state["unlocked_clues"], json!(["photo_a"]));
+    assert_eq!(li_state["unlocked_clues"], json!(["badge_b"]));
+    assert_eq!(zhang_state["messages"][1]["text"], "[zhang] 我愿意说一点。");
+    assert_eq!(li_state["messages"][1]["text"], "[li] 我只认这张单据。");
+    assert!(zhang_state["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event_type"] == "stage_change"));
+    assert!(!li_state["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event_type"] == "stage_change"));
+
+    let zhang_prompt = captured_prompt_text_at(&captured, 0);
+    let li_prompt = captured_prompt_text_at(&captured, 1);
+    assert!(zhang_prompt.contains("zhang_san"));
+    assert!(zhang_prompt.contains("liang_is_neighbor"));
+    assert!(!zhang_prompt.contains("li_has_receipt"));
+    assert!(li_prompt.contains("li_si"));
+    assert!(li_prompt.contains("li_has_receipt"));
+    assert!(!li_prompt.contains("liang_is_neighbor"));
+
+    let (status, body) = end_session(&addr, zhang_id).await;
+    assert_eq!(status, 200, "body: {body}");
+    let zhang_state = get_state(&addr, zhang_id).await;
+    let li_state = get_state(&addr, li_id).await;
+    assert_eq!(zhang_state["is_ended"], true);
+    assert_eq!(li_state["is_ended"], false);
+    assert!(!li_state["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event_type"] == "session_end"));
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;

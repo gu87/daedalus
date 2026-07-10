@@ -1,8 +1,45 @@
-# 测试报告：Narrative Backend Phase 3b
+# 测试报告：Narrative Backend Phase 4a
 
 > developer 完成后填写验证命令和结果；reviewer 只读复核后追加验收结论。
 
 ## Developer 验证
+
+[2026-07-10 15:27 +0800] Phase 4a developer 验证：
+
+- `git fetch origin`：通过；当前分支 `codex/narrative-backend` 与 `origin/codex/narrative-backend` 对齐
+- `cargo fmt --all -- --check`：通过
+- `cargo test -p daedalusd --test http_session`：32 passed
+  - 覆盖 `end_session_marks_state_and_blocks_followup_messages`
+  - 覆盖 `end_session_returns_409_while_processing`
+  - 覆盖 `two_npc_sessions_keep_state_history_events_and_prompts_isolated`
+  - 既有 JSON `/message`、SSE `/message/stream`、Phase 1-3 validator/prompt/stage/evidence/speak 回归继续通过
+- `cargo test -p daedalusd --test http_tasks`：15 passed
+- `cargo test -p daedalusd --test narrative_tools`：7 passed
+- `cargo clippy -p daedalusd --all-targets -- -D warnings`：通过
+- `git diff --check`：通过
+
+结论：
+
+- 新增 `POST /api/session/:session_id/end`，并在两个 router 注册；合法未结束、非 processing session 会写入 `session_end` game event，`/state.is_ended` 由现有事件派生为 `true`。
+- 已结束 session 的 JSON `/message` 与 SSE `/message/stream` 都返回 `410 Gone`，重复 end 返回 `410 Gone`，不存在 session 返回 `404`，processing 中 end 返回 `409`。
+- 新增两 NPC 隔离测试，使用 `zhang_san` 与测试 fixture `li_si` 分别创建 session，证明 prompt/knowledge、messages、confession stage、unlocked clues、game events 和 end 状态不串；结束 A 不影响 B。
+- 本轮未改 DB schema、Agent Loop、Tool trait、Gate、provider、Godot 外部仓库或 `.codex/agents/*.md`、`AGENTS.md`、`work/registry.md`。
+
+改动文件：
+
+- `daedalusd/src/http/server.rs`
+- `daedalusd/src/http/session.rs`
+- `daedalusd/src/narrative/events.rs`
+- `daedalusd/tests/http_session.rs`
+- `work/task.md`
+- `work/test-report.md`
+- `work/callbacks.md`
+
+剩余风险：
+
+- end 状态仍按任务要求只通过 `session_end` event 派生，没有新增 DB flag 或索引。
+- 第二 NPC 目前仅为测试临时 fixture，用于验证隔离；未引入多 NPC 编排、共享状态机或真实内容配置。
+- Phase 4.2/4.4 history/context 截断与摘要、4.5 fallback 配置化、真实 provider/Godot/Gate 仍未进入本轮。
 
 [2026-07-10 14:11 +0800] Phase 3b developer 验证：
 
@@ -228,6 +265,23 @@
 
 - 当前 SSE 是完成后批量发送的最小封装，不是 token/chunk 实时流。
 - Phase 3 后续事项仍未进入本轮：Godot 项目代码接线、真实 LLM provider smoke、Gate AutoRevision、多 NPC 状态机、复杂条件表达式。
+
+## Reviewer 验收
+
+[2026-07-10 14:18 +0800] PASS
+
+- 只读复核 `work/task.md`、当前分支提交与实际代码路径；`git fetch origin` 后确认当前分支 `codex/narrative-backend` 已包含 `52a0579 feat: stream safe narrative speak events`。本轮业务改动落在 `daedalusd/src/types.rs`、`src/ipc/{protocol,control}.rs`、`src/agent/loop.rs`、`src/http/session.rs`、`src/narrative/{mod,session_adapter,stream_events}.rs`、`tests/{agent_loop,http_session}.rs`；工作树中的 `.codex/agents/*.md`、`AGENTS.md`、`work/registry.md` 为既有协作脏改动，未作为本轮业务 diff 阻断。
+- `Message::NarrativeSpeak` / `type = "narrative.speak"` 已作为新 typed IPC message 加入 `types.rs` 与 `ipc/protocol.rs`；`ipc/control.rs` 明确把 `Message::NarrativeSpeak(_)` 与 `TaskStream(_)` 一样排除在 control 路径处理之外，避免控制分发误吞业务事件。
+- `agent_loop::emit_narrative_speak(...)` 只在 `tool_name == "speak"` 且 `tool_result.is_error == false`，并且 `tool_result.output` 可解析且 `event_type == "utterance_complete"` 时发出 typed event；`lifecycle_emits_narrative_speak_after_speak_tool_success` 已覆盖成功路径。
+- Session stream 侧在 `run_session_task(...)` 中只消费 `Message::NarrativeSpeak`，对 `text` 长度、`emotion` 枚举、`game_state.forbidden_terms` 做二次校验；`Some(_) => continue` 也证明 raw `TaskStream { chunk }` 不会进玩家 SSE。`stream_message_ignores_raw_task_stream_and_forbidden_speak` 已证明 raw provider 文本和带 forbidden term 的 speak 都不会出现在 SSE 中。
+- `stream_message_forwards_safe_speak_before_task_done` 已证明 `utterance_complete` 可以早于 `TaskDone` 到达：测试在收到 speak 事件时断言还没有 `done` 事件，且 `is_processing` 仍为真，不是靠最终 summary 文本切片伪造的“提前显示”。
+- 最终 state / persist / stage / clue / done 仍以 `TaskDone.summary` validator 为权威：`handle_session_message(...)` 仍先对 `summary` 做 Phase 2 validator / revision / stage / evidence / clue 流程；若 speak 与最终 `summary.utterance/emotion` 不一致，则以 `speak_summary_mismatch` 走安全 fallback，不追加第二段原始 LLM 文本。普通 JSON `/message` 路径仍复用同一 helper，`http_session` 29 passed 证明 Phase 2a-2e 与 3a 回归未破坏。
+- 重跑 `cargo fmt --all -- --check` 通过；`cargo test -p daedalusd --test agent_loop` 23 passed；`cargo test -p daedalusd --test http_session` 29 passed；`cargo test -p daedalusd --test http_tasks` 15 passed；`cargo test -p daedalusd --test narrative_tools` 7 passed；`cargo clippy -p daedalusd --all-targets -- -D warnings` 通过；`git diff --check` 通过。
+
+剩余风险：
+
+- 本轮仍不是 provider token streaming，也不解析 tool-call argument delta；`/Users/gu/daedalus-courtroom-demo/docs/daedalus-game-backend-plan.md` 的旧 Phase 3 段落仍写着 raw `task.stream -> utterance_chunk` 方案，和当前安全 typed `narrative.speak` 设计存在文档漂移。
+- 当前只接受首个通过校验的 `speak` 事件；多次 `speak` 的撤回/替换语义仍未定义，应作为后续事件协议设计项诚实保留。
 
 ## Reviewer 验收
 

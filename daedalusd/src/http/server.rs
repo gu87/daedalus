@@ -36,6 +36,7 @@ pub fn make_router(state: Arc<HttpState>) -> axum::Router {
             "/api/session/:session_id/message/stream",
             post(session::stream_session_message),
         )
+        .route("/api/session/:session_id/end", post(session::end_session))
         .route(
             "/api/session/:session_id/state",
             get(session::get_session_state),
@@ -63,6 +64,7 @@ pub async fn run_http(listener: TcpListener, state: Arc<HttpState>, shutdown: Ca
             "/api/session/:session_id/message/stream",
             post(session::stream_session_message),
         )
+        .route("/api/session/:session_id/end", post(session::end_session))
         .route(
             "/api/session/:session_id/state",
             get(session::get_session_state),
