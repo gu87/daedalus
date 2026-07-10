@@ -19,8 +19,8 @@ use crate::llm::router::Router;
 use crate::llm::StreamHandle;
 use crate::tools::registry::ToolRegistry;
 use crate::types::{
-    ChatMessage, Message, Outbox, PermissionDecision, StreamChunk, TaskCard, TaskStream, ToolCall,
-    ToolDef, ToolResult,
+    ChatMessage, Message, NarrativeSpeak, Outbox, PermissionDecision, StreamChunk, TaskCard,
+    TaskStream, ToolCall, ToolDef, ToolResult,
 };
 
 use super::heartbeat::HeartbeatLoop;
@@ -510,6 +510,13 @@ impl AgentLoop {
                                             tool_call_id: Some(tool_call.id.clone()),
                                             tool_calls: vec![],
                                         });
+                                        self.emit_narrative_speak(
+                                            &lifecycle,
+                                            &task_id,
+                                            &tool_call.name,
+                                            &tool_result,
+                                        )
+                                        .await;
 
                                         if tool_call.name == "task_done" && !tool_result.is_error {
                                             self.pending_tool_calls.clear();
@@ -588,6 +595,13 @@ impl AgentLoop {
                                                         tool_call_id: Some(tool_call.id.clone()),
                                                         tool_calls: vec![],
                                                     });
+                                                    self.emit_narrative_speak(
+                                                        &lifecycle,
+                                                        &task_id,
+                                                        &tool_call.name,
+                                                        &tool_result,
+                                                    )
+                                                    .await;
                                                     if tool_call.name == "task_done"
                                                         && !tool_result.is_error
                                                     {
@@ -915,6 +929,58 @@ impl AgentLoop {
                 agent_id: self.agent_id.clone(),
                 task_id: task_id.to_string(),
                 chunk: chunk.to_string(),
+            }))
+            .await;
+    }
+
+    async fn emit_narrative_speak(
+        &self,
+        lifecycle: &Option<(LifecycleContext, JoinHandle<()>)>,
+        task_id: &str,
+        tool_name: &str,
+        tool_result: &ToolResult,
+    ) {
+        if tool_name != "speak" || tool_result.is_error {
+            return;
+        }
+        let Ok(output) = serde_json::from_str::<serde_json::Value>(&tool_result.output) else {
+            return;
+        };
+        if output.get("event_type").and_then(|value| value.as_str()) != Some("utterance_complete") {
+            return;
+        }
+        let Some(text) = output
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        let Some(emotion) = output
+            .get("emotion")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        let Some((lc, _)) = lifecycle.as_ref() else {
+            return;
+        };
+        let Some(stream_tx) = &lc.stream_tx else {
+            return;
+        };
+
+        let _ = stream_tx
+            .send(Message::NarrativeSpeak(NarrativeSpeak {
+                ts: crate::ipc::protocol::now_utc(),
+                event_id: None,
+                req_id: lc.req_id.clone(),
+                agent_id: self.agent_id.clone(),
+                task_id: task_id.to_string(),
+                text: text.to_string(),
+                emotion: emotion.to_string(),
             }))
             .await;
     }

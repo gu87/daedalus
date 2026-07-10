@@ -63,6 +63,8 @@ pub enum Message {
     TaskDispatch(Box<TaskDispatch>),
     #[serde(rename = "task.stream")]
     TaskStream(TaskStream),
+    #[serde(rename = "narrative.speak")]
+    NarrativeSpeak(NarrativeSpeak),
     #[serde(rename = "task.done")]
     TaskDone(Box<TaskDone>),
     #[serde(rename = "task.error")]
@@ -237,6 +239,18 @@ pub struct TaskStream {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NarrativeSpeak {
+    pub ts: String,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    pub req_id: String,
+    pub agent_id: String,
+    pub task_id: String,
+    pub text: String,
+    pub emotion: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TaskDone {
     pub ts: String,
     #[serde(default)]
@@ -383,6 +397,21 @@ mod tests {
             }
             _ => panic!("expected SystemPing"),
         }
+    }
+
+    #[test]
+    fn serialize_narrative_speak_has_type_field() {
+        let msg = Message::NarrativeSpeak(NarrativeSpeak {
+            ts: "2026-06-15T10:00:00.000Z".to_string(),
+            event_id: None,
+            req_id: "req-1".to_string(),
+            agent_id: "zhang_san".to_string(),
+            task_id: "task-1".to_string(),
+            text: "我只能先说这些。".to_string(),
+            emotion: "nervous".to_string(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"narrative.speak\""));
     }
 
     #[test]

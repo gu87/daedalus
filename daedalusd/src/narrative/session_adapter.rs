@@ -98,6 +98,11 @@ pub(crate) fn build_task_dispatch(input: SessionTaskInput<'_>) -> TaskDispatch {
                 denied_commands: vec![],
             },
             output_contract: serde_json::json!({
+                "tool_sequence": [
+                    {"tool": "speak", "args": {"text": "summary.utterance", "emotion": "summary.emotion"}},
+                    {"tool": "task_done", "summary": "NPC Reply JSON string"}
+                ],
+                "consistency": "speak text/emotion must exactly match task_done.summary utterance/emotion",
                 "summary_shape": {
                     "utterance": "string",
                     "emotion": "enum(calm|defensive|nervous|anxious|angry|broken)",

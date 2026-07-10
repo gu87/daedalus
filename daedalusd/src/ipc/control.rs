@@ -152,6 +152,7 @@ pub async fn route(
                     ctx.spawn_task(td, writer_tx, session_state, None).await
                 }
                 Message::TaskStream(_)
+                | Message::NarrativeSpeak(_)
                 | Message::TaskDone(_)
                 | Message::TaskError(_)
                 | Message::PermissionRequest(_) => None,

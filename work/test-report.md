@@ -1,8 +1,55 @@
-# 测试报告：Narrative Backend Phase 2c
+# 测试报告：Narrative Backend Phase 3b
 
 > developer 完成后填写验证命令和结果；reviewer 只读复核后追加验收结论。
 
 ## Developer 验证
+
+[2026-07-10 14:11 +0800] Phase 3b developer 验证：
+
+- `git fetch origin`：通过；当前分支 `codex/narrative-backend` 与 `origin/codex/narrative-backend` 对齐
+- `cargo fmt --all -- --check`：通过
+- `cargo test -p daedalusd --test agent_loop`：23 passed
+  - 覆盖 `lifecycle_emits_narrative_speak_after_speak_tool_success`
+  - 证明 typed `narrative.speak` 仅在 `speak` 工具 execute 成功后从 lifecycle channel 发出
+- `cargo test -p daedalusd --test http_session`：29 passed
+  - 覆盖 `stream_message_forwards_safe_speak_before_task_done`
+  - 覆盖 `stream_message_ignores_raw_task_stream_and_forbidden_speak`
+  - 既有 JSON `/message`、Phase 2 validator/prompt/stage/evidence、Phase 3a SSE 完成事件、build / TaskError / timeout 恢复 processing 测试继续通过
+- `cargo test -p daedalusd --test http_tasks`：15 passed
+- `cargo test -p daedalusd --test narrative_tools`：7 passed
+- `cargo clippy -p daedalusd --all-targets -- -D warnings`：通过
+- `git diff --check`：通过
+
+结论：
+
+- 新增 typed `narrative.speak` IPC message，包含 `req_id`、`agent_id`、`task_id`、`text`、`emotion`。
+- Agent Loop 仅在 narrative `speak` tool 成功 execute 且返回 `event_type = utterance_complete` 后发送 `narrative.speak`；raw `TaskStream { chunk }` 仍只代表 provider raw text，不会进入玩家 SSE。
+- `/api/session/:session_id/message/stream` 现在会在任务运行期间消费 typed `narrative.speak`，按当前 session `game_state.forbidden_terms`、text 长度和 emotion enum 二次校验后，能在 `TaskDone` 前发送 `utterance_complete`。
+- `TaskDone.outbox.summary` 仍是最终状态/持久化/stage/clue/done 权威；若已放行 speak 与最终 summary 的 utterance/emotion 不一致，会走安全 fallback，不追加第二段原始 LLM 文本。
+- TaskCard prompt/输出契约已要求 NPC 先调用 `speak(text, emotion)`，再调用 `task_done`，且二者 text/emotion 一致。
+
+改动文件：
+
+- `daedalusd/src/types.rs`
+- `daedalusd/src/ipc/protocol.rs`
+- `daedalusd/src/ipc/control.rs`
+- `daedalusd/src/agent/loop.rs`
+- `daedalusd/src/http/session.rs`
+- `daedalusd/src/narrative/mod.rs`
+- `daedalusd/src/narrative/session_adapter.rs`
+- `daedalusd/src/narrative/stream_events.rs`
+- `daedalusd/tests/agent_loop.rs`
+- `daedalusd/tests/http_session.rs`
+- `work/task.md`
+- `work/test-report.md`
+- `work/callbacks.md`
+
+剩余风险：
+
+- 本轮实现的是安全 tool 事件流基础，不是 provider token streaming，也不解析 tool-call argument delta。
+- 如果某次尝试已放行安全 speak，但最终 summary 触发 revision/fallback，Session 会避免继续追加原始 LLM 文本；完整多尝试可撤回/替换语义仍留给后续更明确的事件协议。
+- stream 端点现在以后台任务推送 SSE，任务启动后的错误会以 SSE `error` event 返回；JSON `/message` 错误语义保持不变。
+- 未修改 `/Users/gu/daedalus-courtroom-demo`，未改 DB migration、Gate、provider、Tool trait。
 
 [2026-07-09 13:42 +0800] Phase 2c developer 验证：
 

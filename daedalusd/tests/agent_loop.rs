@@ -933,6 +933,67 @@ async fn lifecycle_emits_task_stream_for_text_chunks() {
     }
 }
 
+#[tokio::test]
+async fn lifecycle_emits_narrative_speak_after_speak_tool_success() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config_files(&dir);
+    let (db_path, run_id) = lifecycle_db(&dir);
+
+    let provider = Arc::new(FakeProvider::new(make_tool_call_chunks(vec![
+        (
+            "speak-1",
+            "speak",
+            json!({"text": "我只能先说这些。", "emotion": "nervous"}),
+        ),
+        (
+            "done-1",
+            "task_done",
+            json!({"summary": "done after speak"}),
+        ),
+    ])));
+    let broker = Arc::new(FakePermissionBroker {
+        decision: PermissionDecision::Approved,
+        delay: None,
+    });
+    let mut ag = build_loop(
+        &dir,
+        provider,
+        vec![
+            Arc::new(daedalusd::tools::narrative::SpeakTool) as Arc<dyn Tool>,
+            Arc::new(FakeTool::new_ok("task_done")) as Arc<dyn Tool>,
+        ],
+        broker,
+    );
+    let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(8);
+
+    let lc = LifecycleContext {
+        run_id,
+        db_path,
+        req_id: "test-req".into(),
+        stream_tx: Some(stream_tx),
+    };
+    let outbox = ag
+        .run_with_lifecycle(lc, dummy_task_card(), Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(outbox.status, "waiting_for_verification");
+
+    let msg = stream_rx
+        .recv()
+        .await
+        .expect("expected narrative.speak message");
+    match msg {
+        Message::NarrativeSpeak(event) => {
+            assert_eq!(event.req_id, "test-req");
+            assert_eq!(event.agent_id, "test-agent");
+            assert_eq!(event.task_id, "test-task-1");
+            assert_eq!(event.text, "我只能先说这些。");
+            assert_eq!(event.emotion, "nervous");
+        }
+        other => panic!("expected NarrativeSpeak, got {other:?}"),
+    }
+}
+
 /// 17. Timeout writes error + task_timeout taxonomy to DB.
 #[tokio::test]
 async fn scenario_17_lifecycle_timeout_writes_error() {

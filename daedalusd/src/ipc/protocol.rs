@@ -174,6 +174,7 @@ fn parse_value(value: Value) -> Result<Message, ProtocolError> {
             | "system.error"
             | "task.dispatch"
             | "task.stream"
+            | "narrative.speak"
             | "task.done"
             | "task.error"
             | "permission.request"
@@ -284,6 +285,48 @@ fn validate_message(msg: &Message) -> Result<(), ProtocolError> {
                     code: SystemErrorCode::InvalidMessage,
                     req_id: None,
                     detail: "task.stream: 'req_id' must not be empty".into(),
+                });
+            }
+            Ok(())
+        }
+        Message::NarrativeSpeak(event) => {
+            validate_event_id(event.event_id.as_deref())?;
+            if event.req_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: None,
+                    detail: "narrative.speak: 'req_id' must not be empty".into(),
+                });
+            }
+            if event.agent_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(event.req_id.clone()),
+                    detail: "narrative.speak: 'agent_id' must not be empty".into(),
+                });
+            }
+            if event.task_id.is_empty() {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(event.req_id.clone()),
+                    detail: "narrative.speak: 'task_id' must not be empty".into(),
+                });
+            }
+            if event.text.trim().is_empty() || event.text.chars().count() > 500 {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(event.req_id.clone()),
+                    detail: "narrative.speak: invalid text".into(),
+                });
+            }
+            if !matches!(
+                event.emotion.as_str(),
+                "calm" | "defensive" | "nervous" | "anxious" | "angry" | "broken"
+            ) {
+                return Err(ProtocolError {
+                    code: SystemErrorCode::InvalidMessage,
+                    req_id: Some(event.req_id.clone()),
+                    detail: "narrative.speak: invalid emotion".into(),
                 });
             }
             Ok(())

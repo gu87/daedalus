@@ -117,6 +117,18 @@ struct SessionMessageOutcome {
     response: SessionMessageResponse,
     old_confession_stage: String,
     stage_change_reason: Option<String>,
+    streamed_utterance: bool,
+}
+
+#[derive(Clone)]
+struct SafeSpeakEvent {
+    text: String,
+    emotion: String,
+}
+
+struct SessionTaskRun {
+    summary: String,
+    speak: Option<SafeSpeakEvent>,
 }
 
 pub(crate) async fn start_session(
@@ -199,7 +211,7 @@ pub(crate) async fn message_session(
     Path(session_id): Path<String>,
     Json(body): Json<SessionMessageRequest>,
 ) -> Result<Json<SessionMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let outcome = handle_session_message(state, session_id, body).await?;
+    let outcome = handle_session_message(state, session_id, body, None).await?;
     Ok(Json(outcome.response))
 }
 
@@ -211,30 +223,53 @@ pub(crate) async fn stream_session_message(
     Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    let outcome = handle_session_message(state, session_id, body).await?;
-    let events = stream_events::message_events(stream_events::MessageStreamInput {
-        session_id: &outcome.response.session_id,
-        npc_id: &outcome.response.npc_id,
-        utterance: &outcome.response.utterance,
-        emotion: &outcome.response.emotion,
-        old_confession_stage: &outcome.old_confession_stage,
-        confession_stage: &outcome.response.confession_stage,
-        stage_change_reason: outcome.stage_change_reason.as_deref(),
-        revealed_clues: &outcome.response.revealed_clues,
-    })
-    .into_iter()
-    .map(|event| sse_event(event.event, event.payload))
-    .collect::<Vec<_>>();
+    let (sse_tx, sse_rx) = mpsc::channel::<Event>(16);
+    tokio::spawn(async move {
+        match handle_session_message(state, session_id, body, Some(sse_tx.clone())).await {
+            Ok(outcome) => {
+                let mut events = stream_events::message_events(stream_events::MessageStreamInput {
+                    session_id: &outcome.response.session_id,
+                    npc_id: &outcome.response.npc_id,
+                    utterance: &outcome.response.utterance,
+                    emotion: &outcome.response.emotion,
+                    old_confession_stage: &outcome.old_confession_stage,
+                    confession_stage: &outcome.response.confession_stage,
+                    stage_change_reason: outcome.stage_change_reason.as_deref(),
+                    revealed_clues: &outcome.response.revealed_clues,
+                });
+                if outcome.streamed_utterance {
+                    events.retain(|event| event.event != "utterance_complete");
+                }
+                for event in events {
+                    let _ = sse_tx.send(sse_event(event.event, event.payload)).await;
+                }
+            }
+            Err((status, body)) => {
+                let _ = sse_tx
+                    .send(sse_event(
+                        "error",
+                        serde_json::json!({
+                            "status": status.as_u16(),
+                            "error": body.0.error,
+                        }),
+                    ))
+                    .await;
+            }
+        }
+    });
 
-    Ok(Sse::new(stream::iter(
-        events.into_iter().map(Ok::<_, Infallible>),
-    )))
+    Ok(Sse::new(stream::unfold(sse_rx, |mut rx| async {
+        rx.recv()
+            .await
+            .map(|event| (Ok::<_, Infallible>(event), rx))
+    })))
 }
 
 async fn handle_session_message(
     state: Arc<HttpState>,
     session_id: String,
     body: SessionMessageRequest,
+    sse_tx: Option<mpsc::Sender<Event>>,
 ) -> Result<SessionMessageOutcome, (StatusCode, Json<ErrorResponse>)> {
     let player_text = body.player_text.trim().to_string();
     if player_text.is_empty() {
@@ -276,13 +311,15 @@ async fn handle_session_message(
         revision_feedback: None,
     });
 
-    let summary = run_session_task(&state, &session_id, &dispatch).await?;
+    let first_run =
+        run_session_task(&state, &session_id, &dispatch, &snapshot, sse_tx.as_ref()).await?;
+    let mut streamed_speak = first_run.speak.clone();
     let default_reply = reply::fallback_reply(
         default_confession_stage.clone(),
         default_revealed_clues.clone(),
     );
     let reply = match reply::try_from_task_summary(
-        &summary,
+        &first_run.summary,
         &snapshot.confession_stage,
         &snapshot.game_state,
         body.evidence_id.as_deref(),
@@ -307,21 +344,49 @@ async fn handle_session_message(
                     narrative_root: &knowledge::root_from_config(&state.ctx.config),
                     revision_feedback: Some(&revision_feedback),
                 });
-            let revised_summary = run_session_task(&state, &session_id, &revision_dispatch).await?;
+            let revision_sse_tx = if streamed_speak.is_none() {
+                sse_tx.as_ref()
+            } else {
+                None
+            };
+            let revised_run = run_session_task(
+                &state,
+                &session_id,
+                &revision_dispatch,
+                &snapshot,
+                revision_sse_tx,
+            )
+            .await?;
+            if streamed_speak.is_none() {
+                streamed_speak = revised_run.speak.clone();
+            }
             match reply::try_from_task_summary(
-                &revised_summary,
+                &revised_run.summary,
                 &snapshot.confession_stage,
                 &snapshot.game_state,
                 body.evidence_id.as_deref(),
                 default_reply.clone(),
             ) {
                 Ok(revised_reply) => reply::mark_revised(revised_reply, &first_error, 1),
-                Err(second_error) => {
-                    reply::fallback_after_revision(default_reply, &second_error, &first_error, 1)
-                }
+                Err(second_error) => reply::fallback_after_revision(
+                    default_reply.clone(),
+                    &second_error,
+                    &first_error,
+                    1,
+                ),
             }
         }
     };
+    let mut reply = reply;
+    if let Some(speak) = &streamed_speak {
+        if reply.utterance != speak.text || reply.emotion != speak.emotion {
+            reply = default_reply.clone();
+            reply.utterance = speak.text.clone();
+            reply.emotion = speak.emotion.clone();
+            reply.validation_status = "fallback".into();
+            reply.validation_error = Some("speak_summary_mismatch".into());
+        }
+    }
     let stage_change_reason = stage::stage_change_reason(stage::StageChangeReasonInput {
         current_stage: &snapshot.confession_stage,
         reply_stage: &reply.confession_stage,
@@ -353,7 +418,10 @@ async fn handle_session_message(
     .map_err(|_| to_http_error(SessionError::Internal("spawn_blocking panic".into())))?;
 
     match response {
-        Ok(response) => Ok(response),
+        Ok(mut response) => {
+            response.streamed_utterance = streamed_speak.is_some();
+            Ok(response)
+        }
         Err(err) => {
             reset_processing_after_error(&state.db_path, &session_id).await?;
             Err(to_http_error(err))
@@ -365,7 +433,9 @@ async fn run_session_task(
     state: &Arc<HttpState>,
     session_id: &str,
     dispatch: &TaskDispatch,
-) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    snapshot: &SessionSnapshot,
+    sse_tx: Option<&mpsc::Sender<Event>>,
+) -> Result<SessionTaskRun, (StatusCode, Json<ErrorResponse>)> {
     let (writer_tx, mut writer_rx) = mpsc::channel::<Message>(32);
     let session_state = Arc::new(SessionState::new());
     if let Some(err_msg) = state
@@ -381,11 +451,38 @@ async fn run_session_task(
         return Err(to_http_error(SessionError::Internal(detail)));
     }
 
+    let mut speak = None;
     let terminal_message = match tokio::time::timeout(SESSION_TASK_WAIT_TIMEOUT, async {
         loop {
             match writer_rx.recv().await {
                 Some(Message::TaskDone(done)) => return Ok(done.outbox.summary),
                 Some(Message::TaskError(err)) => return Err(err.detail),
+                Some(Message::NarrativeSpeak(event)) => {
+                    if event.task_id == dispatch.task_id
+                        && speak.is_none()
+                        && validate_session_speak(&event.text, &event.emotion, &snapshot.game_state)
+                    {
+                        let safe = SafeSpeakEvent {
+                            text: event.text,
+                            emotion: event.emotion,
+                        };
+                        if let Some(tx) = sse_tx {
+                            let _ = tx
+                                .send(sse_event(
+                                    "utterance_complete",
+                                    serde_json::json!({
+                                        "session_id": session_id,
+                                        "npc_id": snapshot.npc_id,
+                                        "task_id": dispatch.task_id,
+                                        "full_text": &safe.text,
+                                        "emotion": &safe.emotion,
+                                    }),
+                                ))
+                                .await;
+                        }
+                        speak = Some(safe);
+                    }
+                }
                 Some(_) => continue,
                 None => return Err("session task channel closed".into()),
             }
@@ -410,12 +507,31 @@ async fn run_session_task(
     };
 
     match terminal_message {
-        Ok(summary) => Ok(summary),
+        Ok(summary) => Ok(SessionTaskRun { summary, speak }),
         Err(detail) => {
             reset_processing_after_error(&state.db_path, session_id).await?;
             Err(to_http_error(SessionError::Internal(detail)))
         }
     }
+}
+
+fn validate_session_speak(text: &str, emotion: &str, game_state: &Value) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().count() <= 500
+        && matches!(
+            emotion,
+            "calm" | "defensive" | "nervous" | "anxious" | "angry" | "broken"
+        )
+        && !game_state
+            .get("forbidden_terms")
+            .and_then(Value::as_array)
+            .is_some_and(|terms| {
+                terms.iter().filter_map(Value::as_str).any(|term| {
+                    let term = term.trim();
+                    !term.is_empty() && text.contains(term)
+                })
+            })
 }
 
 fn sse_event(event: &str, payload: Value) -> Event {
@@ -712,6 +828,7 @@ fn persist_session_message_once(
         },
         old_confession_stage: input.old_confession_stage.clone(),
         stage_change_reason: input.stage_change_reason.clone(),
+        streamed_utterance: false,
     })
 }
 

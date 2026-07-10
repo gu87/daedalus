@@ -14,6 +14,7 @@ use daedalusd::llm::router::Router;
 use daedalusd::llm::{stream_channel, LLMProvider, StreamHandle};
 use daedalusd::tools::registry::ToolRegistry;
 use daedalusd::types::{ChatMessage, ChatResponse, ModelConfig, StreamChunk, ToolCall, ToolDef};
+use futures_util::StreamExt;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -22,8 +23,15 @@ use tokio_util::sync::CancellationToken;
 enum LoopMode {
     Text(String),
     Sequence(Arc<Mutex<Vec<String>>>),
+    StreamTurns(Arc<Mutex<Vec<StreamTurn>>>),
     Error,
     Hang,
+}
+
+#[derive(Clone)]
+struct StreamTurn {
+    delay: Duration,
+    chunks: Vec<StreamChunk>,
 }
 
 struct FakeProvider {
@@ -62,6 +70,10 @@ impl LLMProvider for FakeProvider {
                     }],
                 })
             }
+            LoopMode::StreamTurns(_) => Ok(ChatResponse {
+                content: String::new(),
+                tool_calls: vec![],
+            }),
             LoopMode::Error => Err(ProviderError::Auth {
                 status: 401,
                 body: "fake auth failure".into(),
@@ -115,6 +127,19 @@ impl LLMProvider for FakeProvider {
                 });
                 Ok(handle)
             }
+            LoopMode::StreamTurns(turns) => {
+                let (tx, handle) = stream_channel();
+                let turn = next_stream_turn(turns);
+                tokio::spawn(async move {
+                    tokio::time::sleep(turn.delay).await;
+                    for chunk in turn.chunks {
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                Ok(handle)
+            }
             LoopMode::Hang => {
                 let (tx, handle) = stream_channel();
                 tokio::spawn(async move {
@@ -136,6 +161,18 @@ fn next_sequence_text(items: &Arc<Mutex<Vec<String>>>) -> String {
     }
 }
 
+fn next_stream_turn(turns: &Arc<Mutex<Vec<StreamTurn>>>) -> StreamTurn {
+    let mut turns = turns.lock().unwrap();
+    if turns.is_empty() {
+        StreamTurn {
+            delay: Duration::ZERO,
+            chunks: vec![],
+        }
+    } else {
+        turns.remove(0)
+    }
+}
+
 struct TestAgentLoopFactory {
     mode: LoopMode,
     config: DaedalusConfig,
@@ -152,6 +189,9 @@ impl AgentLoopFactory for TestAgentLoopFactory {
         let mut tool_registry = ToolRegistry::new();
         tool_registry
             .register(Arc::new(daedalusd::tools::task_done::TaskDoneTool))
+            .map_err(|e| DaedalusError::Protocol(format!("tool registry error: {e}")))?;
+        tool_registry
+            .register(Arc::new(daedalusd::tools::narrative::SpeakTool))
             .map_err(|e| DaedalusError::Protocol(format!("tool registry error: {e}")))?;
         let tool_registry = Arc::new(tool_registry);
         let provider = Arc::new(FakeProvider {
@@ -208,7 +248,7 @@ fn write_phase1_fixture(base: &std::path::Path) {
     .unwrap();
     std::fs::write(
         base.join("config/managed-agents.yaml"),
-        "agents:\n  zhang_san:\n    role_summary: \"A nervous witness in the police station.\"\n    tools: [t1,task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: fake-model\n      fallback_chain: []\n",
+        "agents:\n  zhang_san:\n    role_summary: \"A nervous witness in the police station.\"\n    tools: [t1,speak,task_done]\n    permission: ask_user\n    model_strategy:\n      primary:\n        model: fake-model\n      fallback_chain: []\n",
     )
     .unwrap();
     std::fs::write(
@@ -555,9 +595,7 @@ async fn stream_message_returns_sse_events_with_stage_and_clue_changes() {
     .await;
     assert_eq!(status, 200, "body: {body}");
     assert!(content_type.starts_with("text/event-stream"));
-    assert!(body.contains("event: utterance_chunk"));
-    assert!(body.contains(r#""text":"[""#));
-    assert!(body.contains(r#""cumulative":"[fake-loop] 我愿意再说一点。""#));
+    assert!(!body.contains("event: utterance_chunk"));
     assert!(body.contains("event: utterance_complete"));
     assert!(body.contains(r#""full_text":"[fake-loop] 我愿意再说一点。""#));
     assert!(body.contains("event: stage_change"));
@@ -572,6 +610,163 @@ async fn stream_message_returns_sse_events_with_stage_and_clue_changes() {
     let state = get_state(&addr, session_id).await;
     assert_eq!(state["confession_stage"], "vague");
     assert_eq!(state["unlocked_clues"], json!(["photo_1"]));
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn stream_message_forwards_safe_speak_before_task_done() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let speak_text = "[safe-speak] 我先说这一句。";
+    let summary = r#"{"utterance":"[safe-speak] 我先说这一句。","emotion":"nervous","stage_delta":{"should_change":false,"new_stage":null,"reason":null},"reveals":[],"debug_tags":[],"confidence":0.85}"#;
+    let turns = Arc::new(Mutex::new(vec![
+        StreamTurn {
+            delay: Duration::ZERO,
+            chunks: vec![StreamChunk::ToolCall {
+                id: "speak-1".into(),
+                name: "speak".into(),
+                input: json!({"text": speak_text, "emotion": "nervous"}),
+            }],
+        },
+        StreamTurn {
+            delay: Duration::from_millis(200),
+            chunks: vec![StreamChunk::ToolCall {
+                id: "done-1".into(),
+                name: "task_done".into(),
+                input: json!({"summary": summary}),
+            }],
+        },
+    ]));
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::StreamTurns(turns),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session(&addr).await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/session/{session_id}/message/stream"
+        ))
+        .json(&json!({"player_text": "先说。", "pressure_level": "normal"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/event-stream"));
+
+    let mut body = String::new();
+    let mut stream = resp.bytes_stream();
+    while !body.contains("event: utterance_complete") {
+        let chunk = stream
+            .next()
+            .await
+            .expect("expected early speak event")
+            .unwrap();
+        body.push_str(std::str::from_utf8(&chunk).unwrap());
+    }
+    assert!(body.contains(speak_text), "body so far: {body}");
+    assert!(!body.contains("event: done"), "body so far: {body}");
+    assert!(session_processing(&db_path, session_id));
+
+    while let Some(chunk) = stream.next().await {
+        body.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+    }
+    assert!(body.contains("event: done"));
+    assert!(body.contains(r#""confession_stage":"denial""#));
+
+    let state = get_state(&addr, session_id).await;
+    assert_eq!(state["messages"][1]["text"], speak_text);
+    assert!(!session_processing(&db_path, session_id));
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn stream_message_ignores_raw_task_stream_and_forbidden_speak() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("test.sqlite");
+    let config = test_config(dir.path(), &db_path);
+    init_db(&db_path);
+    let safe_summary = r#"{"utterance":"[safe-final] 我换个说法。","emotion":"calm","stage_delta":{"should_change":false,"new_stage":null,"reason":null},"reveals":[],"debug_tags":[],"confidence":0.85}"#;
+    let turns = Arc::new(Mutex::new(vec![
+        StreamTurn {
+            delay: Duration::ZERO,
+            chunks: vec![
+                StreamChunk::Text {
+                    content: "RAW_PROVIDER_SECRET".into(),
+                },
+                StreamChunk::ToolCall {
+                    id: "speak-1".into(),
+                    name: "speak".into(),
+                    input: json!({"text": "SECRET forbidden line", "emotion": "calm"}),
+                },
+            ],
+        },
+        StreamTurn {
+            delay: Duration::ZERO,
+            chunks: vec![StreamChunk::ToolCall {
+                id: "done-1".into(),
+                name: "task_done".into(),
+                input: json!({"summary": safe_summary}),
+            }],
+        },
+    ]));
+    let (addr, shutdown) = start_server(
+        dir.path(),
+        &db_path,
+        Arc::new(TestAgentLoopFactory {
+            mode: LoopMode::StreamTurns(turns),
+            config: config.clone(),
+            captured_messages: None,
+        }),
+        config,
+    )
+    .await;
+    let session = start_session_with_game_state(
+        &addr,
+        json!({
+            "case_id": "wujing_fenhen",
+            "forbidden_terms": ["SECRET"],
+            "unlocked_evidence_ids": [],
+            "player_reputation": 50,
+            "time_pressure": 0.3
+        }),
+    )
+    .await;
+    let session_id = session["session_id"].as_str().unwrap();
+
+    let (status, content_type, body) = send_message_stream(
+        &addr,
+        session_id,
+        json!({"player_text": "继续。", "pressure_level": "normal"}),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert!(content_type.starts_with("text/event-stream"));
+    assert!(!body.contains("RAW_PROVIDER_SECRET"));
+    assert!(!body.contains("SECRET forbidden line"));
+    assert!(body.contains(r#""full_text":"[safe-final] 我换个说法。""#));
+    assert!(body.contains("event: done"));
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -622,8 +817,7 @@ async fn stream_message_fallback_does_not_leak_invalid_summary() {
     .await;
     assert_eq!(status, 200, "body: {body}");
     assert!(content_type.starts_with("text/event-stream"));
-    assert!(body.contains("event: utterance_chunk"));
-    assert!(body.contains(r#""cumulative":"我不知道你在说什么。""#));
+    assert!(!body.contains("event: utterance_chunk"));
     assert!(body.contains("event: utterance_complete"));
     assert!(body.contains(r#""full_text":"我不知道你在说什么。""#));
     assert!(!body.contains("不该展示"));
