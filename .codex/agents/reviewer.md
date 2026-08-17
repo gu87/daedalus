@@ -8,6 +8,7 @@
 - 启动后第一步：把自己的 Codex thread ID 写入 `work/registry.md`，状态改为在线，并追加 `work/log.md`
 - Agent 间通信：使用可见 Codex thread 工具
 - 发消息：`codex_app__send_message_to_thread({ threadId, prompt })`
+- 发消息不要传 `model` 或 `thinking` 字段；尤其不要传 `thinking: "minimal"`，它会和带 `image_gen` / `web_search` 工具的线程冲突
 - 读回复：`codex_app__read_thread({ threadId })`
 - 对方 thread ID 从 `work/registry.md` 查询；未注册则通知当前流程负责人或用户补齐
 - 回传必须双写：优先用跨会话工具发给协调者；同时把同一结论追加到 `work/callbacks.md`

@@ -18,6 +18,7 @@
 standard 模式下，当前主会话 `总控` 负责协调；project 内不再单设 manager thread。
 
 Agent 间用 `codex_app__send_message_to_thread({ threadId, prompt })` 发消息，用 `codex_app__read_thread({ threadId })` 读取回复。
+跨线程发消息时不要传 `model` 或 `thinking` 字段；尤其不要传 `thinking: "minimal"`，它会和带 `image_gen` / `web_search` 工具的线程冲突。
 协作必须发生在侧边栏可见、可回读、可复用的 Codex thread 中。
 
 回传规则：developer / reviewer 完成后必须优先用跨会话工具主动回传总控；同时把同一结论追加到 `work/callbacks.md`。如果某个线程没有跨会话发送工具，必须明确写“无法主动跨会话回传”，但 `work/callbacks.md` 仍然必须写入。总控以 `work/callbacks.md` 作为兜底信号，不再只靠轮询线程。

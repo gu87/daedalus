@@ -22,6 +22,7 @@
 ## 通信协议
 
 - 发消息：`codex_app__send_message_to_thread({ threadId, prompt })`
+- 发消息不要传 `model` 或 `thinking` 字段；尤其不要传 `thinking: "minimal"`，它会和带 `image_gen` / `web_search` 工具的线程冲突
 - 读回复：`codex_app__read_thread({ threadId })`
 - developer / reviewer 完成后必须追加同一结论到 `work/callbacks.md`
 - 若无法主动跨会话回传总控，必须在 `work/callbacks.md` 明确写“无法主动跨会话回传”
