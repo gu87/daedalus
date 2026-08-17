@@ -1,7 +1,11 @@
-# 当前任务：Narrative Backend Phase 4a - 多 NPC Session 隔离 + 主动结束会话
+# 当前任务：~~Narrative Backend Phase 4a~~（已完成，2026-07-10 reviewer PASS）
 
 > standard 模式：总控分派；developer 实现；reviewer 只读验收。
-> 本轮只做多 NPC session 隔离验收和主动结束会话，不做 Phase 4 其他打磨项。
+
+## 状态：✅ 已完成
+
+Phase 4a「多 NPC Session 隔离 + 主动结束会话」已由 developer 实现（15:27）并经 reviewer 只读验收 PASS（15:31）。
+验收记录见 `work/test-report.md` 与 `work/callbacks.md`，实现提交 `577b896 feat: add narrative session end lifecycle`。
 
 ## 背景
 
@@ -72,26 +76,26 @@ POST /api/session/:session_id/end
 
 ## 验收标准
 
-- [ ] `make_router(...)` 注册 `POST /api/session/:session_id/end`
-- [ ] `run_http(...)` 注册 `POST /api/session/:session_id/end`
-- [ ] end 成功后 state `is_ended = true`
-- [ ] end 成功后 events 包含 `session_end`
-- [ ] end 后 JSON `/message` 返回 `410 Gone`
-- [ ] end 后 `/message/stream` 返回 `410 Gone`
-- [ ] processing 时 end 返回 `409 Conflict`
-- [ ] 不存在 session end 返回 `404 Not Found`
-- [ ] 重复 end 返回 `410 Gone`
-- [ ] 两 NPC session history/stage/clue/events/end 独立
-- [ ] prompt/knowledge 不串
-- [ ] 结束 A 不影响 B
-- [ ] 原有 Phase 1-3 `http_session` 回归仍通过
-- [ ] `cargo fmt --all -- --check` 通过
-- [ ] `cargo test -p daedalusd --test http_session` 通过
-- [ ] `cargo test -p daedalusd --test http_tasks` 通过
-- [ ] `cargo test -p daedalusd --test narrative_tools` 通过
-- [ ] `cargo clippy -p daedalusd --all-targets -- -D warnings` 通过
-- [ ] `git diff --check` 通过
-- [ ] developer 完成后追加结论到 `work/callbacks.md` 并主动回传总控
+- [x] `make_router(...)` 注册 `POST /api/session/:session_id/end`
+- [x] `run_http(...)` 注册 `POST /api/session/:session_id/end`
+- [x] end 成功后 state `is_ended = true`
+- [x] end 成功后 events 包含 `session_end`
+- [x] end 后 JSON `/message` 返回 `410 Gone`
+- [x] end 后 `/message/stream` 返回 `410 Gone`
+- [x] processing 时 end 返回 `409 Conflict`
+- [x] 不存在 session end 返回 `404 Not Found`
+- [x] 重复 end 返回 `410 Gone`
+- [x] 两 NPC session history/stage/clue/events/end 独立
+- [x] prompt/knowledge 不串
+- [x] 结束 A 不影响 B
+- [x] 原有 Phase 1-3 `http_session` 回归仍通过（32 passed）
+- [x] `cargo fmt --all -- --check` 通过
+- [x] `cargo test -p daedalusd --test http_session` 通过
+- [x] `cargo test -p daedalusd --test http_tasks` 通过
+- [x] `cargo test -p daedalusd --test narrative_tools` 通过
+- [x] `cargo clippy -p daedalusd --all-targets -- -D warnings` 通过
+- [x] `git diff --check` 通过
+- [x] developer 完成后追加结论到 `work/callbacks.md` 并主动回传总控
 
 ## Phase 4a 完成定义
 
@@ -100,3 +104,5 @@ Reviewer PASS 后，Phase 4a 可标记完成：
 ```text
 Daedalus Session API 支持主动结束审讯，并已验证多 NPC session 的状态、历史、知识边界与结束状态互相隔离。
 ```
+
+✅ 已达成。下一轮候选：Phase 4.2/4.4 history/context 截断与摘要、4.5 fallback 配置化、真实 provider/Godot/Gate 集成。

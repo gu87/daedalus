@@ -24,6 +24,21 @@ use daedalusd::types::{
     ToolDef,
 };
 
+/// Receive until a terminal message (TaskDone/TaskError) arrives, skipping
+/// intermediate stream chunks the agent loop emits on success paths.
+async fn recv_terminal(rx: &mut mpsc::Receiver<Message>) -> Message {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timeout waiting for terminal message")
+            .expect("channel closed before terminal message");
+        match msg {
+            Message::TaskDone(_) | Message::TaskError(_) => return msg,
+            _ => continue,
+        }
+    }
+}
+
 fn dummy_task_card() -> TaskCard {
     TaskCard {
         schema_version: "2.8".into(),
@@ -207,10 +222,7 @@ async fn dispatch_success_eventually_waiting_for_verification() {
         .spawn_task(&td, tx, Arc::new(SessionState::new()), None)
         .await;
     assert!(result.is_none());
-    let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let msg = recv_terminal(&mut rx).await;
     assert!(
         matches!(msg, Message::TaskDone(_)),
         "expected TaskDone, got {msg:?}"
@@ -462,10 +474,7 @@ async fn switch_agent_transitions_via_blocked() {
         .spawn_task(&td, tx, Arc::new(SessionState::new()), None)
         .await;
     assert!(result.is_none());
-    let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let msg = recv_terminal(&mut rx).await;
     assert!(
         matches!(msg, Message::TaskDone(_)),
         "expected TaskDone, got {msg:?}"

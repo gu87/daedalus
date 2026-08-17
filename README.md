@@ -4,11 +4,16 @@ Daedalus 是一个跑在你自己电脑上的 AI 任务执行器。你可以把�
 
 一个用 Rust 从零实现的本地 Agent 运行时。包含 9 状态 Agent Loop、NDJSON over UDS IPC、SQLite 持久化、Gate 错误路由、HTTP API。
 
-> **项目状态：已完成，不再活跃开发。**
+> **项目状态：核心 Agent Runtime 已完成；narrative 后端（审讯 Session API）在 `codex/narrative-backend` 分支继续开发。**
 >
-> 本项目为 Agent Runtime 架构的工程实践。从协议设计到状态机实现，从 LLM Provider 抽象到工具系统，覆盖了一个自托管 Agent 后台该有的核心模块。代码保留作为参考实现；如果你想 fork 在此基础上继续做，欢迎。
+> 本项目为 Agent Runtime 架构的工程实践。从协议设计到状态机实现，从 LLM Provider 抽象到工具系统，覆盖了一个自托管 Agent 后台该有的核心模块。当前有两个开发线：
+>
+> - `master` — Agent Runtime 核心（协议 / Agent Loop / Gate / SQLite / HTTP），功能稳定
+> - `codex/narrative-backend` — 为 `/Users/gu/daedalus-courtroom-demo`（Godot 推理游戏《雾井焚痕》）提供审讯玩法叙事后端：Session API、SSE 流式、多 NPC 隔离（Phase 1-4a 已完成，见 `PLANS.md`「Narrative Backend」章节）
+>
+> 代码保留作为参考实现；如果你想 fork 在此基础上继续做，欢迎。
 
-代码规模：Rust daemon ~13K 行（248 个测试通过），Python CLI ~1.9K 行。
+代码规模：Rust daemon ~16.3K 行（520+ 个测试通过），Python CLI ~1.9K 行。
 
 ## 组件
 
@@ -62,8 +67,15 @@ Daedalus 是一个跑在你自己电脑上的 AI 任务执行器。你可以把�
  │  http/             ── axum HTTP server          │
  │  http/health.rs    ── GET /api/health           │
  │  http/tasks.rs     ── GET /api/tasks            │
+ │  http/session.rs   ── narrative Session API     │
+ │                       (start/message/stream/end/state) │
  │  http/config.rs    ── GET /api/config/models    │
  │  http/validate.rs  ── POST /api/models/validate │
+ │                                                │
+ │  narrative/        ── 审讯叙事后端（分支）        │
+ │  narrative/validator.rs / session_adapter.rs   │
+ │  narrative/knowledge.rs / stage.rs / state.rs  │
+ │  narrative/reply.rs / events.rs / stream_events.rs │
  │                                                │
  │  types.rs          ── Message enum, TaskCard,   │
  │                       Outbox, ToolDef, etc.     │
@@ -104,6 +116,11 @@ Anthropic 和 OpenAI Compat 两个 adapter，共享 `LLMProvider` trait。`Route
 - `GET /api/tasks/:run_id` — 单任务详情
 - `GET /api/config/models` — 模型摘要（不含密钥）
 - `POST /api/models/validate` — 单模型连通性探测
+- `POST /api/session/start` — 新建审讯 session（narrative 分支）
+- `POST /api/session/:session_id/message` — 玩家审讯消息（JSON，阻塞式）
+- `POST /api/session/:session_id/message/stream` — 审讯消息（SSE 流式）
+- `POST /api/session/:session_id/end` — 主动结束审讯 session
+- `GET /api/session/:session_id/state` — 审讯状态（stage/clues/events/is_ended）
 
 ### Run Transcript + Hooks
 
@@ -203,7 +220,7 @@ daedalus ping --socket /tmp/test.sock
 # Rust
 cargo fmt --all -- --check
 cargo check --workspace
-cargo test --workspace            # 248 passed
+cargo test --workspace            # 520+ passed（全量必须全绿——验收基线）
 cargo clippy --workspace -- -D warnings
 
 # Python

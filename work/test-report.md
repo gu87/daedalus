@@ -325,3 +325,35 @@
 
 - 这仍是 Phase 2 范围内的单次修正闭环，不是完整 Gate Router 策略系统；现有 Gate AutoRevision 仍主要处理 Agent 执行失败。
 - 真实 LLM provider smoke、Godot 接线、多 NPC 状态机、多证据同时满足、复杂条件表达式仍属于后续 Phase。
+
+## Reviewer 验收
+
+[2026-07-10 15:31 +0800] PASS
+
+- 只读复核 `work/task.md`、`daedalusd/src/http/{server,session}.rs`、`daedalusd/src/narrative/events.rs`、`daedalusd/tests/http_session.rs` 与当前工作树；`git fetch origin` 后确认 `HEAD`/`origin/codex/narrative-backend` 均已包含 `577b896 feat: add narrative session end lifecycle`。当前脏文件仅见 `.codex/agents/*.md`、`AGENTS.md`、`work/registry.md` 等既有协作改动，未作为本轮业务 diff 阻断。
+- `make_router(...)` 与 `run_http(...)` 都已注册 `POST /api/session/:session_id/end`；`end_session_once(...)` 只在 session 存在、未 processing、未结束时写入 `session_end` 事件并返回新的 state。`events::session_end(...)` payload 也已补齐 `session_id` / `npc_id` / `reason` / `final_stage`。
+- `end_session_marks_state_and_blocks_followup_messages` 已证明正常 end 后 `/state.is_ended = true`、`events` 中出现 `session_end`；重复 end 返回 `410 Gone`，后续 JSON `/message` 与 SSE `/message/stream` 也都返回 `410 Gone`。`end_session_returns_409_while_processing` 已证明 processing 中 end 返回 `409 Conflict`；同用例和 `sess-missing` 断言覆盖了 `404 Not Found`。
+- `ensure_session_can_message(...)` 会在 JSON `/message` 与 SSE `/message/stream` 两条路径上统一拦截已结束 session，且在 `410` 前不 dispatch task；`load_session_for_message(...)` 也再次用 `session_end` event 做守门，因此 end 后不会继续处理消息。
+- `two_npc_sessions_keep_state_history_events_and_prompts_isolated` 已证明 `zhang_san` 与 `li_si` 的 `npc_id`、`case_id`、messages、`confession_stage`、`unlocked_clues`、`game_events`、prompt/knowledge boundary 都不串；结束 A 后仅 A 的 `is_ended` 变 `true`，B 保持未结束，且 B 的 events 中没有 `session_end`。
+- 本轮未改 DB migration、Gate、Agent Loop、Tool trait，也未修改 `/Users/gu/daedalus-courtroom-demo`；`http_session` 32 passed 说明 Phase 1-3 既有 JSON `/message`、SSE、typed speak、revision、stage/evidence 回归仍通过。
+- 重跑 `cargo fmt --all -- --check` 通过；`cargo test -p daedalusd --test http_session` 32 passed；`cargo test -p daedalusd --test http_tasks` 15 passed；`cargo test -p daedalusd --test narrative_tools` 7 passed；`cargo clippy -p daedalusd --all-targets -- -D warnings` 通过；`git diff --check` 通过。
+
+剩余风险：
+
+- end 状态仍按本轮要求只由 `session_end` event 派生，没有新增 DB flag 或索引；如果后续需要更高频查询或跨表统计，再考虑结构化字段。
+- Phase 4.2 / 4.4 的 history/context 截断与摘要、Phase 4.5 的 fallback 配置化、以及真实 provider / Godot / Gate 集成仍未进入本轮，不应被本次 PASS 掩盖。
+
+## 回归修复记录（2026-08-17）
+
+[2026-08-17] 修复 `codex/narrative-backend` 分支 11 个回归测试，全量测试恢复全绿：
+
+- 根因：`5f17905 feat: emit task stream chunks from agent loop` 让 Agent Loop 在成功路径上先发 `TaskStream` 再发 `TaskDone`/`TaskError`；`gate_daemon` / `pipeline_daemon` 的旧断言仍期望直接收到终止消息，报 `expected TaskDone, got TaskStream`。
+- 修复：两个测试文件各新增 `recv_terminal()` helper，循环接收直到终止消息（跳过 TaskStream 等中间消息），替换 11 个失败断言点（gate_daemon 9 处 + pipeline_daemon 2 处）。
+- 验证：
+  - `cargo test -p daedalusd --test gate_daemon`：23 passed（原 14 passed / 9 failed）
+  - `cargo test -p daedalusd --test pipeline_daemon`：4 passed（原 2 passed / 2 failed）
+  - `cargo test -p daedalusd`：全量 520+ passed，0 failed
+  - 全量运行中 "readonly database" 报错计数为 0（原为断言 panic 提前销毁 TempDir、后台 `tokio::spawn` 仍写库的次生效应，随断言修复消失）
+  - `cargo fmt --all -- --check`、`cargo clippy -p daedalusd --all-targets -- -D warnings`、`git diff --check` 均通过
+- 附带发现（未处理）：`daedalusd/src/run_artifacts/` 模块在 `daemon.rs` 中无任何调用点（死代码），共享 `/tmp/runs` 因此无实际写入。
+- 教训：验收基线应从「本轮涉及文件的测试」改为「`cargo test -p daedalusd` 全量必须全绿」，避免漏掉未更新断言的套件。

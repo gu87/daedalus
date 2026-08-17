@@ -1898,3 +1898,65 @@ P5.3a TaskStatus + tasks 表 + 基础 CRUD [DONE] (e35e1b1, fixup: f458671)
 3. 修复 AgentLoop denied 路径跳过 pending_tool_calls 的 bug
 
 **E2E 验证**：`daedalus run "confirm task done with message: hello world"` → exit 0 + task.done ✅
+
+# Daedalus Narrative Backend 实施计划
+
+> 范围：为 `/Users/gu/daedalus-courtroom-demo`（Godot 推理游戏《雾井焚痕》）的审讯玩法提供叙事后端。
+> 在 `codex/narrative-backend` 分支开发（2026-07 起），采用 standard 协作模式（总控 → developer → reviewer），
+> 每轮范围与验收标准在 `work/task.md`，验证记录在 `work/test-report.md`，双写回传在 `work/callbacks.md`。
+> 本系列阶段未进原 Phase 1-5 计划，故单独成章。
+
+## N1 Phase 1 — 最小审讯 Session API [DONE]
+
+> 提交：`3338a98`（开团队）→ `e82f392`（session adapter phase 1 完成）
+
+**核心交付**：
+
+- `POST /api/session/start` 创建审讯 session（npc_id / case_id / 初始 confession_stage）
+- `POST /api/session/:session_id/message` 阻塞式玩家审讯消息 → NPC 回复
+- `game_events` 事件日志（session_start / player_message / npc_reply / stage_change / clue_unlocked）
+- `GET /api/session/:session_id/state` 游戏侧状态契约：由 messages/events 推导 `emotional_state`、`turn_count`、`unlocked_clues`、`is_ended`，返回 `created_at` / `updated_at`
+- 确定性阶段推进与线索解锁事件（写入事件日志，不依赖 LLM）
+- narrative 游戏工具（`speak` / `state` / `stage` / `clue` / `done`）与知识库 YAML 加载（`knowledge/` 目录）
+- `DAEDALUS_NARRATIVE_ROOT` 环境变量覆盖知识库根目录
+- 限制：不改 DB migration、不改 Tool trait、不接 SSE / Godot / 真实 provider
+
+## N2 Phase 2 — 回复校验、prompt 注入与阶段门控 [DONE]
+
+> 提交：`0b4fd9b` → `ad7176d`（phase 2 completion audit）
+
+**核心交付**：
+
+- N2a `validate_task_summary(...)`：校验 LLM `task_done.summary` 符合 NPC Reply schema（utterance / emotion / stage_delta / reveals / confidence），非法回复触发 revision 重试
+- N2b prompt/knowledge 注入：`SessionTaskInput` 组装 TaskDispatch，注入 `output_contract_text` + `knowledge_boundary`（按 npc_id + confession_stage 过滤知识）
+- N2c 阶段跳转约束：`CONFESSION_STAGES = [denial, vague, partial, breakdown]`，只允许单步前进，跳级/同阶段伪变化 → `invalid_stage_transition` fallback
+- N2d 证据门槛：目标阶段存在非空 `required_evidence_id` 时，本轮 `evidence_id` 必须精确匹配
+- N2e 候选证据：支持 `required_evidence_ids` 字符串数组候选（空数组/空串/缺字段/非字符串元素忽略）
+
+## N3 Phase 3 — SSE 流式与安全 speak 事件流 [DONE]
+
+> 提交：`5b7af34` → `52a0579`（stream safe narrative speak events）
+
+**核心交付**：
+
+- N3a `POST /api/session/:session_id/message/stream` SSE 端点；narrative 运行时按模块拆分（session_adapter / state / stream_events / message_log）
+- Agent Loop 增加 `TaskStream` chunk 发射（`emit_task_stream`，仅在有 lifecycle 时）
+- N3b 安全 `narrative.speak`：typed `NarrativeSpeak` IPC 消息，只在 `speak` 工具 execute 成功且返回 `utterance_complete` 后发出；raw `TaskStream { chunk }` 不进入玩家 SSE；Session SSE 侧二次校验 text 长度 / emotion 枚举 / `forbidden_terms`；`utterance_complete` 可早于 `TaskDone` 到达
+- 最终 state / persist / stage / clue / done 仍以 `TaskDone.summary` validator 为权威
+
+## N4 Phase 4a — 多 NPC 隔离 + 主动结束会话 [DONE]
+
+> 提交：`577b896`（narrative session end lifecycle）
+
+**核心交付**：
+
+- `POST /api/session/:session_id/end`：session 存在、未结束、未 processing 时写入 `session_end` game event，`/state.is_ended = true`（由事件派生，不新增 DB flag）
+- 已结束 session 的 JSON `/message` 与 `/message/stream` 返回 `410 Gone`，重复 end 返回 `410`，不存在返回 `404`，processing 中返回 `409`
+- 多 NPC 隔离验收：`zhang_san` 与测试 fixture `li_si` 的 prompt/knowledge、messages、confession stage、unlocked clues、game events、end 状态互不串，结束 A 不影响 B
+
+## N5 Phase 4 剩余项（未做）
+
+- N4.2 / N4.4 history/context 截断与 LLM 摘要
+- N4.5 fallback 配置化（fallback.yaml）
+- 真实 provider / Godot / Gate 集成
+- 多 NPC 编排与共享状态机（当前第二 NPC 仅为测试 fixture）

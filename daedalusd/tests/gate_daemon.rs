@@ -31,6 +31,21 @@ use daedalusd::types::{
 
 // ── helpers ───────────────────────────────────────────────────────────
 
+/// Receive until a terminal message (TaskDone/TaskError) arrives, skipping
+/// intermediate stream chunks the agent loop emits on success paths.
+async fn recv_terminal(rx: &mut mpsc::Receiver<Message>) -> Message {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timeout waiting for terminal message")
+            .expect("channel closed before terminal message");
+        match msg {
+            Message::TaskDone(_) | Message::TaskError(_) => return msg,
+            _ => continue,
+        }
+    }
+}
+
 fn dummy_task_card() -> TaskCard {
     TaskCard {
         schema_version: "2.8".into(),
@@ -493,10 +508,7 @@ rules:
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
 
     match msg {
         Message::TaskDone(_) => {}
@@ -769,10 +781,7 @@ rules:
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
     assert!(matches!(msg, Message::TaskDone(_)));
 
     let recorded = provider.take_recorded();
@@ -859,10 +868,7 @@ rules:
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
 
     match msg {
         Message::TaskDone(td_msg) => {
@@ -1044,10 +1050,7 @@ rules:
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
 
     match msg {
         Message::TaskDone(_) => {}
@@ -1398,10 +1401,7 @@ async fn streaming_midflight_provider_error_preserved() {
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
 
     match msg {
         Message::TaskError(te) => {
@@ -1609,10 +1609,7 @@ rules:
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
 
     match msg {
         Message::TaskDone(_) => {} // retry succeeded!
@@ -1767,10 +1764,7 @@ rules:
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
 
     match msg {
         Message::TaskDone(_) => {} // retry succeeded!
@@ -1957,10 +1951,7 @@ rules:
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
 
     match msg {
         Message::TaskDone(td_msg) => {
@@ -2181,10 +2172,7 @@ rules:
     let result = ctx.spawn_task(&td, writer_tx, session_state, None).await;
     assert!(result.is_none());
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
-        .await
-        .unwrap()
-        .expect("should receive a terminal message");
+    let msg = recv_terminal(&mut writer_rx).await;
     assert!(matches!(msg, Message::TaskDone(_)));
 
     // Inspect agent-B's recorded messages for feedback.
